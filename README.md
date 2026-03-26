@@ -6,7 +6,8 @@
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" loading="lazy">
 </div>
 
-<img width="700" height="700" alt="image" src="https://github.com/user-attachments/assets/26f339b0-3a17-4906-88f1-ca6fd4946d6a" />
+<img width="700" height="700" alt="image" src="https://github.com/user-attachments/assets/5fa23b3c-2708-4ac8-9ec6-f9c585bf6a06" />
+" />
 
 Real-time desktop application that upmixes stereo music into discrete 5.1 output using JUCE.
 
