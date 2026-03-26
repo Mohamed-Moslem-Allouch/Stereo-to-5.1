@@ -1,4 +1,4 @@
-# 5.1 Surround Upmixer
+# Stereo to 5.1 
 <div class="project-badges">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platform: Windows, macOS, Linux" loading="lazy">
   <img src="https://img.shields.io/badge/language-C%2B%2B17-orange" alt="Language: C++17" loading="lazy">
