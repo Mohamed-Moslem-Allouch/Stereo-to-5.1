@@ -1,12 +1,12 @@
-# Stereo to 5.1 
+# Convert Stereo to 5.1 
 <div class="project-badges">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platform: Windows, macOS, Linux" loading="lazy">
   <img src="https://img.shields.io/badge/language-C%2B%2B17-orange" alt="Language: C++17" loading="lazy">
   <img src="https://img.shields.io/badge/framework-JUCE%208-cyan" alt="Framework: JUCE 8" loading="lazy">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" loading="lazy">
 </div>
-<br/>
-<img width="968" height="1022" alt="image" src="https://github.com/user-attachments/assets/26f339b0-3a17-4906-88f1-ca6fd4946d6a" />
+
+<img width="700" height="700" alt="image" src="https://github.com/user-attachments/assets/26f339b0-3a17-4906-88f1-ca6fd4946d6a" />
 
 Real-time desktop application that upmixes stereo music into discrete 5.1 output using JUCE.
 
@@ -35,7 +35,7 @@ This project is built in C++17 with CMake and targets low-latency multi-channel 
 | 4 | SL | Surround Left |
 | 5 | SR | Surround Right |
 
-<img width="409" height="360" alt="image" src="https://github.com/user-attachments/assets/773322b3-f163-40fe-8e19-6223fe5898c9" />
+<img width="300" height="300" alt="image" src="https://github.com/user-attachments/assets/773322b3-f163-40fe-8e19-6223fe5898c9" />
 
 ## DSP summary
 
@@ -73,6 +73,11 @@ Executable path:
 ```text
 build\Surround51Upmixer_artefacts\Release\5.1 Surround Upmixer.exe
 ```
+## Test Hardware
+Testing was conducted on a Jazz Speakers J-9941A 5.1-channel home theater amplifier speaker system, which supports Dolby Digital and DTS audio formats.
+
+<img width="600" height="600" alt="image" src="https://github.com/user-attachments/assets/38aafb89-7fbc-4703-b565-38d3d9abfe90" />
+
 
 ## First run
 
@@ -82,11 +87,16 @@ build\Surround51Upmixer_artefacts\Release\5.1 Surround Upmixer.exe
 4. Toggle between `STEREO` and `5.1 SURROUND`.
 5. Tune the parameter panels while listening.
 6. Use `Audio Settings` to select output device/channel config.
-   <img width="647" height="470" alt="image" src="https://github.com/user-attachments/assets/3ce3b5ad-08b4-439d-a530-871dc4775db5" />
+   
+<img width="500" height="500" alt="image" src="https://github.com/user-attachments/assets/3ce3b5ad-08b4-439d-a530-871dc4775db5" />
 
-"Ensure your audio output is set to 5.1 surround sound." <br/>
+## Ensure your audio output is set to 5.1 surround sound. <br/>
 Before proceeding, verify that your system is configured for 5.1 speaker setup. This is essential for proper channel mapping and surround sound functionality
-<img width="1059" height="897" alt="image" src="https://github.com/user-attachments/assets/c13efeed-0c82-448b-9bb0-ee5efbed0596" />
+
+<img width="500" height="500" alt="image" src="https://github.com/user-attachments/assets/ae954c75-00f9-425f-b310-c0ec84e93fdd"/>
+
+## Realtek audio console
+<img width="500" height="500" alt="image" src="https://github.com/user-attachments/assets/c13efeed-0c82-448b-9bb0-ee5efbed0596" />
 
 ## Export to 5.1 WAV
 
@@ -106,9 +116,7 @@ Notes:
   - Check selected output device in `Audio Settings` or `Your System Output`.
 - Only 2 channels active:
   - Your current device may be stereo.
-  - Switch to a 5.1-capable device and configure it in Windows Sound settings.
-  - <img width="1059" height="897" alt="image" src="https://github.com/user-attachments/assets/c13efeed-0c82-448b-9bb0-ee5efbed0596" />
-
+  - Switch to a 5.1-capable device and configure it in `Windows Sound settings` or `Realtek audio console`.
 - Wrong output after device switch:
   - The app polls and follows default output changes, but manually reselecting device in `Audio Settings` can force immediate sync.
 
@@ -124,6 +132,5 @@ Notes:
 └─ JUCE/
 ```
 ## Author
-
 Mohamed Moslem Allouch
 
