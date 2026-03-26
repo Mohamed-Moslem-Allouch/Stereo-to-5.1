@@ -1,4 +1,12 @@
 # 5.1 Surround Upmixer
+<div class="project-badges">
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-blue" alt="Platform: Windows, macOS, Linux" loading="lazy">
+  <img src="https://img.shields.io/badge/language-C%2B%2B17-orange" alt="Language: C++17" loading="lazy">
+  <img src="https://img.shields.io/badge/framework-JUCE%208-cyan" alt="Framework: JUCE 8" loading="lazy">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" loading="lazy">
+</div>
+<br/>
+<img width="968" height="1022" alt="image" src="https://github.com/user-attachments/assets/26f339b0-3a17-4906-88f1-ca6fd4946d6a" />
 
 Real-time desktop application that upmixes stereo music into discrete 5.1 output using JUCE.
 
@@ -39,7 +47,7 @@ This project is built in C++17 with CMake and targets low-latency multi-channel 
 ## Requirements
 
 - Windows 10/11 (primary tested target)
-- Visual Studio 2022 with `Desktop development with C++`
+- Visual Studio 2026 with `Desktop development with C++`
 - CMake 3.22+
 - A playback device with:
   - stereo output (minimum), or
@@ -72,6 +80,11 @@ build\Surround51Upmixer_artefacts\Release\5.1 Surround Upmixer.exe
 4. Toggle between `STEREO` and `5.1 SURROUND`.
 5. Tune the parameter panels while listening.
 6. Use `Audio Settings` to select output device/channel config.
+   <img width="647" height="470" alt="image" src="https://github.com/user-attachments/assets/3ce3b5ad-08b4-439d-a530-871dc4775db5" />
+
+"Ensure your audio output is set to 5.1 surround sound."
+Before proceeding, verify that your system is configured for 5.1 speaker setup. This is essential for proper channel mapping and surround sound functionality
+<img width="1059" height="897" alt="image" src="https://github.com/user-attachments/assets/c13efeed-0c82-448b-9bb0-ee5efbed0596" />
 
 ## Export to 5.1 WAV
 
