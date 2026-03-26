@@ -35,6 +35,8 @@ This project is built in C++17 with CMake and targets low-latency multi-channel 
 | 4 | SL | Surround Left |
 | 5 | SR | Surround Right |
 
+<img width="409" height="360" alt="image" src="https://github.com/user-attachments/assets/773322b3-f163-40fe-8e19-6223fe5898c9" />
+
 ## DSP summary
 
 - Mid/Side extraction from stereo input
@@ -82,7 +84,7 @@ build\Surround51Upmixer_artefacts\Release\5.1 Surround Upmixer.exe
 6. Use `Audio Settings` to select output device/channel config.
    <img width="647" height="470" alt="image" src="https://github.com/user-attachments/assets/3ce3b5ad-08b4-439d-a530-871dc4775db5" />
 
-"Ensure your audio output is set to 5.1 surround sound."
+"Ensure your audio output is set to 5.1 surround sound." <br/>
 Before proceeding, verify that your system is configured for 5.1 speaker setup. This is essential for proper channel mapping and surround sound functionality
 <img width="1059" height="897" alt="image" src="https://github.com/user-attachments/assets/c13efeed-0c82-448b-9bb0-ee5efbed0596" />
 
@@ -101,10 +103,12 @@ Notes:
 
 - No sound:
   - Confirm file is loaded and transport is playing.
-  - Check selected output device in `Audio Settings`.
+  - Check selected output device in `Audio Settings` or `Your System Output`.
 - Only 2 channels active:
   - Your current device may be stereo.
   - Switch to a 5.1-capable device and configure it in Windows Sound settings.
+  - <img width="1059" height="897" alt="image" src="https://github.com/user-attachments/assets/c13efeed-0c82-448b-9bb0-ee5efbed0596" />
+
 - Wrong output after device switch:
   - The app polls and follows default output changes, but manually reselecting device in `Audio Settings` can force immediate sync.
 
@@ -113,23 +117,12 @@ Notes:
 ```text
 .
 ├─ CMakeLists.txt
-├─ README.md
-├─ PRESENTATION.md
 ├─ Source/
 │  ├─ Main.cpp
 │  ├─ MainComponent.h
 │  ├─ MainComponent.cpp
-│  └─ BUILD_GUIDE.md
 └─ JUCE/
 ```
-
-## Roadmap ideas
-
-- Preset save/load to JSON
-- True peak/loudness metering
-- Optional Dolby-like target curves and profile modes
-- Multi-platform CI build pipeline
-
 ## Author
 
 Mohamed Moslem Allouch
