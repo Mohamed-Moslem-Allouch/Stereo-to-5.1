@@ -7,7 +7,6 @@
 </div>
 
 <img width="700" height="700" alt="image" src="https://github.com/user-attachments/assets/5fa23b3c-2708-4ac8-9ec6-f9c585bf6a06" />
-" />
 
 Real-time desktop application that upmixes stereo music into discrete 5.1 output using JUCE.
 
