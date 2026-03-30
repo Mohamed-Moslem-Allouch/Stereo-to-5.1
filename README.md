@@ -6,7 +6,8 @@
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT" loading="lazy">
 </div>
 
-<img width="700" height="700" alt="image" src="https://github.com/user-attachments/assets/5fa23b3c-2708-4ac8-9ec6-f9c585bf6a06" />
+# New Update: 
+<img width="700" height="700" alt="image" src="https://github.com/user-attachments/assets/631745d0-439a-40cb-9f8c-10fcec804210" />
 
 Real-time desktop application that upmixes stereo music into discrete 5.1 output using JUCE.
 
@@ -21,8 +22,16 @@ This project is built in C++17 with CMake and targets low-latency multi-channel 
 - Outputs six independent channels:
   - FL, FR, FC, LFE, SL, SR
 - Provides live controls for center, LFE, surround field, and decorrelation
-- Supports offline export to a 5.1 WAV file with your current settings
+- Supports offline export to a 5.1 WAV file with current settings
+- Supports batch export of multiple source files to 5.1 WAV
 - Follows system output-device changes in real time
+- Saves and loads custom presets (`.json`)
+- Restores the last session state (mode, parameters, file, transport position)
+- Includes an output safety limiter with live gain-reduction feedback
+- Includes A/B snapshot compare (`Store/Recall A/B`)
+- Includes per-channel `Solo` / `Mute` controls
+- Includes pro metering stats (Peak dBFS, LUFS approx, clip count)
+- Includes speaker calibration controls (per-channel trim/delay/polarity)
 
 ## Channel order (5.1)
 
@@ -48,24 +57,45 @@ This project is built in C++17 with CMake and targets low-latency multi-channel 
 
 ## Requirements
 
-- Windows 10/11 (primary tested target)
-- Visual Studio 2026 with `Desktop development with C++`
 - CMake 3.22+
-- A playback device with:
+- C++17 compiler
+- JUCE folder at `./JUCE`
+- Playback device:
   - stereo output (minimum), or
-  - 5.1 output (recommended for full experience)
+  - 5.1 output (recommended)
 
-## Build instructions (Windows)
+### Windows
+
+- Windows 10/11
+- Visual Studio 2026 with `Desktop development with C++`
+
+### macOS
+
+- Xcode Command Line Tools
+- Ninja (`brew install ninja`)
+
+### Linux (Ubuntu/Debian)
+
+- `build-essential`, `ninja-build`, `pkg-config`
+- JUCE GUI/audio deps:
+  - `libasound2-dev`, `libjack-jackd2-dev`, `ladspa-sdk`
+  - `libfreetype6-dev`, `libx11-dev`, `libxcomposite-dev`, `libxcursor-dev`
+  - `libxext-dev`, `libxinerama-dev`, `libxrandr-dev`, `libxrender-dev`
+  - `libglu1-mesa-dev`, `mesa-common-dev`
+  
+## Build instructions
 
 1. Clone the repository.
-2. Make sure a `JUCE/` folder exists next to `CMakeLists.txt`.
-3. Build:
+2. Ensure `JUCE/` exists next to `CMakeLists.txt`.
+
+### Windows (Visual Studio)
 
 ```bat
 mkdir build
 cd build
-cmake .. -G "Visual Studio 18 2026" -A x64
+cmake .. -G "Visual Studio 18 2026" -A x64 -DBUILD_TESTING=ON
 cmake --build . --config Release
+ctest --test-dir . -C Release --output-on-failure
 ```
 
 Executable path:
@@ -73,11 +103,27 @@ Executable path:
 ```text
 build\Surround51Upmixer_artefacts\Release\5.1 Surround Upmixer.exe
 ```
+
+### macOS (Ninja)
+
+```bash
+mkdir -p build
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build --parallel
+```
+
+### Linux (Ninja)
+
+```bash
+mkdir -p build
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build build --parallel
+```
+
 ## Test Hardware
 Testing was conducted on a Jazz Speakers J-9941A 5.1-channel home theater amplifier speaker system, which supports Dolby Digital and DTS audio formats.
 
 <img width="600" height="600" alt="image" src="https://github.com/user-attachments/assets/38aafb89-7fbc-4703-b565-38d3d9abfe90" />
-
 
 ## First run
 
@@ -101,13 +147,21 @@ Before proceeding, verify that your system is configured for 5.1 speaker setup. 
 ## Export to 5.1 WAV
 
 1. Load a track.
-2. Set your desired controls.
+2. Set desired controls.
 3. Click `Export 5.1 WAV`.
 4. Choose destination filename.
 
 Notes:
-- Export uses your current parameter values snapshot.
-- Export format is 5.1 WAV (24-bit writer path in current code).
+- Export uses your current parameter snapshot.
+- Export format is 5.1 WAV (24-bit).
+- Export path also applies the same output safety limiter.
+
+## Batch export
+
+1. Click `Batch Export`.
+2. Select multiple source files.
+3. Select destination folder.
+4. The app renders all files using your current upmix settings.
 
 ## Troubleshooting
 
@@ -129,6 +183,10 @@ Notes:
 │  ├─ Main.cpp
 │  ├─ MainComponent.h
 │  ├─ MainComponent.cpp
+|-- tests/
+|   `-- UpmixEngineSmokeTest.cpp
+|-- .github/workflows/
+|   `-- windows-build.yml
 └─ JUCE/
 ```
 ## Author
