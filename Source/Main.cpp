@@ -48,7 +48,7 @@ public:
         // Configures resizable native window and hosts MainComponent content.
         MainWindow(juce::String name)
             : DocumentWindow(name,
-                             juce::Colour(0xff080c10),
+                             juce::Colour(0xff07090c),
                              DocumentWindow::allButtons)
         {
             setUsingNativeTitleBar(false);

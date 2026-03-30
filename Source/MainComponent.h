@@ -1,5 +1,8 @@
-﻿#pragma once
+#pragma once
 #include <JuceHeader.h>
+#include <array>
+#include <atomic>
+#include <memory>
 
 //==============================================================================
 //  Psychoacoustic 5.1 upmix engine.
@@ -62,6 +65,7 @@ public:
 
 private:
     double sr = 44100.0;
+    int maxBlockSize = 0;
 
     // Center channel filters
     juce::dsp::IIR::Filter<float> fcHPF;
@@ -101,6 +105,27 @@ private:
     UpmixParams prevParams;
 
     juce::dsp::ProcessSpec spec {};
+
+    // Pre-allocated scratch buffers used in process() to avoid audio-thread allocations.
+    juce::AudioBuffer<float> scratchMid;
+    juce::AudioBuffer<float> scratchSide;
+    juce::AudioBuffer<float> scratchFC;
+    juce::AudioBuffer<float> scratchLFE;
+    juce::AudioBuffer<float> scratchSurr;
+    juce::AudioBuffer<float> scratchSL;
+    juce::AudioBuffer<float> scratchSR;
+    juce::AudioBuffer<float> scratchSLConv;
+    juce::AudioBuffer<float> scratchSRConv;
+
+    // Smoothed parameters to reduce zipper noise while dragging controls.
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> frontGainSmoothed;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> centerGainSmoothed;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> lfeGainSmoothed;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> surroundGainSmoothed;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> sideBlendSmoothed;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> midBlendSmoothed;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> reverbWetSmoothed;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> roomSizeSmoothed;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(UpmixEngine)
 };
@@ -255,7 +280,8 @@ public:
     void setCards(const juce::Rectangle<int>& front,
                   const juce::Rectangle<int>& lfe,
                   const juce::Rectangle<int>& surround,
-                  const juce::Rectangle<int>& space);
+                  const juce::Rectangle<int>& space,
+                  const juce::Rectangle<int>& calib);
     void paint(juce::Graphics&) override;
 
 private:
@@ -263,6 +289,7 @@ private:
     juce::Rectangle<int> lfeCard;
     juce::Rectangle<int> surroundCard;
     juce::Rectangle<int> spaceCard;
+    juce::Rectangle<int> calibCard;
 };
 
 //==============================================================================
@@ -290,6 +317,14 @@ public:
     void timerCallback() override;
 
 private:
+    struct SnapshotState
+    {
+        UpmixParams params;
+        float masterGain = 1.0f;
+        bool surroundMode = false;
+        bool valid = false;
+    };
+
     // Audio objects
     juce::AudioFormatManager       formatManager;
     juce::AudioTransportSource     transport;
@@ -315,6 +350,7 @@ private:
     // File
     juce::TextButton fileBtn  { "Open Audio File" };
     juce::TextButton exportBtn { "Export 5.1 WAV" };
+    juce::TextButton batchExportBtn { "Batch Export Folder" };
     juce::TextButton settingsBtn { "Audio Settings" };
     juce::Label      fileLabel;
     juce::Label      statusLabel;
@@ -332,10 +368,32 @@ private:
     juce::TextButton presetMusic  { "Music Wide" };
     juce::TextButton presetVocal  { "Vocal Focus" };
     juce::TextButton presetReset  { "Reset" };
+    juce::TextButton presetSave   { "Save Preset" };
+    juce::TextButton presetLoad   { "Load Preset" };
+    int              activePreset = -1; // 0=cinema, 1=music, 2=vocal
+
+    // A/B snapshot compare
+    juce::TextButton snapshotStoreA  { "Store A" };
+    juce::TextButton snapshotStoreB  { "Store B" };
+    juce::TextButton snapshotRecallA { "Recall A" };
+    juce::TextButton snapshotRecallB { "Recall B" };
+    juce::Label      snapshotLabel;
+    SnapshotState    snapshotA;
+    SnapshotState    snapshotB;
 
     // Volume
     juce::Slider     masterVol;
     juce::Label      masterVolLabel;
+    juce::Label      limiterLabel;
+    juce::Label      meterStatsLabel;
+    juce::TextButton resetMeterStatsBtn { "Reset Stats" };
+
+    // Per-channel control row
+    juce::Label channelControlLabel;
+    std::array<juce::TextButton, 6> soloBtns {{
+        juce::TextButton("FL"), juce::TextButton("FR"), juce::TextButton("FC"),
+        juce::TextButton("LFE"), juce::TextButton("SL"), juce::TextButton("SR")
+    }};
 
     // Meters
     ChannelMeter mFL  { "FL",  juce::Colour(0xff00cfff) };
@@ -381,13 +439,18 @@ private:
     ParamSlider sVelvetDens  { "Decorrelation",     500.f, 4000.f,2200.f,"Hz",  juce::Colour(0xffaa88ff) };
 
     // Section labels
-    juce::Label lblFront, lblLFE, lblSurround, lblSpace;
+    juce::Label lblFront, lblLFE, lblSurround, lblSpace, lblCalib;
+    std::array<std::unique_ptr<ParamSlider>, 6> calibTrim;
+    std::array<std::unique_ptr<ParamSlider>, 6> calibDelay;
+    std::array<std::unique_ptr<juce::ToggleButton>, 6> calibPolarity;
 
     // Helper methods
     // Opens the file chooser and loads a track.
     void openFile();
     // Exports loaded audio to a 6-channel WAV using current processing settings.
     void exportCurrentTrackTo51Wav();
+    // Batch export multiple files using current settings.
+    void exportBatchTo51Wav();
     // Opens JUCE audio device settings dialog.
     void openAudioSettings();
     // Updates play button behavior and label.
@@ -417,9 +480,45 @@ private:
     static juce::String formatTime(double seconds);
     // Copies all slider values into engine parameters.
     void syncParamsFromSliders();
+    // Captures current slider state into a parameter struct.
+    UpmixParams captureParamsFromSliders() const;
+    // Publishes slider params to the lock-free audio thread slot.
+    void publishParamsToAudioThread();
+
+    // Preset/session persistence helpers.
+    juce::File getStateDirectory() const;
+    juce::File getSessionFile() const;
+    juce::File getDefaultPresetFile() const;
+    bool savePresetToFile(const juce::File& file);
+    bool loadPresetFromFile(const juce::File& file);
+    void saveSessionState();
+    void restoreSessionState();
+    void saveDefaultPreset();
+    void loadDefaultPreset();
+    // Shared render function for single and batch export.
+    bool renderFileTo51Wav(const juce::File& source,
+                           const juce::File& target,
+                           const UpmixParams& paramsSnapshot,
+                           float masterGainSnapshot,
+                           float& maxLimiterReductionDb,
+                           juce::String& errorText);
+
+    // Snapshot and routing helpers.
+    void storeSnapshot(bool toA);
+    void recallSnapshot(bool fromA);
+    void refreshSnapshotLabel();
+    // Channel control mode: 0=normal, 1=mute, 2=solo.
+    int getChannelControlMode(int ch) const;
+    void setChannelControlMode(int ch, int mode, bool shouldSave);
+    void refreshChannelControlButton(int ch);
+    void resetProMeters();
+    void applyChannelMasking(juce::AudioBuffer<float>& buffer, int numSamples);
+    void applySpeakerCalibration(juce::AudioBuffer<float>& buffer, int numSamples);
+    void updateMeterStats(const juce::AudioBuffer<float>& buffer, int numSamples);
 
     bool fileLoaded = false;
     bool suppressSliderCallbacks = false;
+    bool suppressSessionPersistence = false;
     bool timelineBeingDragged = false;
     bool deviceReconfigInProgress = false;
     int statusRefreshTick = 0;
@@ -431,7 +530,40 @@ private:
     juce::String lastKnownDefaultOutputName;
     std::unique_ptr<juce::FileChooser> fileChooser;
     std::unique_ptr<juce::FileChooser> exportChooser;
+    std::unique_ptr<juce::FileChooser> presetChooser;
+    std::unique_ptr<juce::FileChooser> batchSourceChooser;
+    std::unique_ptr<juce::FileChooser> batchTargetChooser;
+    juce::Array<juce::File> batchPendingFiles;
+
+    // Re-used real-time buffers (avoid heap allocations in audio callback).
+    juce::AudioBuffer<float> stereoInBuf;
+
+    // Lock-free parameter handoff: UI thread writes inactive slot, audio thread reads active slot.
+    std::array<UpmixParams, 2> paramSlots { UpmixParams{}, UpmixParams{} };
+    std::atomic<int> activeParamSlot { 0 };
+    std::atomic<float> masterGainAtomic { 1.0f };
+
+    // Output safety limiter + clip indicator state.
+    float limiterGainState = 1.0f;
+    float limiterReleaseCoeff = 0.0f;
+    std::atomic<float> limiterReductionDbAtomic { 0.0f };
+    std::atomic<int> limiterHoldBlocksAtomic { 0 };
+    std::atomic<float> peakDbAtomic { -120.0f };
+    std::atomic<float> lufsApproxAtomic { -70.0f };
+    std::atomic<int> clipEventsAtomic { 0 };
+    float lufsIntegrator = 0.0f;
+
+    // Per-channel mute/solo state (audio-thread safe atomics).
+    std::array<std::atomic<int>, 6> soloAtomic {};
+    std::array<std::atomic<int>, 6> muteAtomic {};
+
+    // Per-channel speaker calibration state.
+    std::array<std::atomic<float>, 6> calibTrimGainAtomic {};
+    std::array<std::atomic<float>, 6> calibDelayMsAtomic {};
+    std::array<std::atomic<int>, 6> calibPolarityAtomic {};
+    juce::AudioBuffer<float> speakerDelayBuffer;
+    int speakerDelayWritePos = 0;
+    int speakerDelayCapacity = 0;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
-

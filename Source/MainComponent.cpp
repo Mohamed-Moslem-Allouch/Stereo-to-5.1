@@ -1,27 +1,208 @@
-﻿#include "MainComponent.h"
+#include "MainComponent.h"
 
 //==============================================================================
 //  COLOURS & CONSTANTS
 //==============================================================================
-static const juce::Colour COL_BG0   (0xff070b12);
-static const juce::Colour COL_BG1   (0xff0e1623);
-static const juce::Colour COL_BG2   (0xff152132);
-static const juce::Colour COL_BG3   (0xff24344b);
-static const juce::Colour COL_PANEL (0xff0d1521);
-static const juce::Colour COL_BRDR  (0xff3f5471);
-static const juce::Colour COL_ACC   (0xff59d5ff);
-static const juce::Colour COL_ORG   (0xffffb45b);
-static const juce::Colour COL_GRN   (0xff79e4b8);
-static const juce::Colour COL_YLW   (0xffffd978);
-static const juce::Colour COL_PRP   (0xff9fb1ff);
-static const juce::Colour COL_TXT   (0xfff1f6ff);
-static const juce::Colour COL_MUT   (0xffa4b4ca);
+static const juce::Colour COL_BG0   (0xff07090c);
+static const juce::Colour COL_BG1   (0xff141a24);
+static const juce::Colour COL_BG2   (0xff1c2533);
+static const juce::Colour COL_BG3   (0xff33485f);
+static const juce::Colour COL_PANEL (0xff141a24);
+static const juce::Colour COL_BRDR  (0xff4a5f78);
+static const juce::Colour COL_ACC   (0xff00cfff);
+static const juce::Colour COL_ORG   (0xffff5e00);
+static const juce::Colour COL_GRN   (0xff00e896);
+static const juce::Colour COL_YLW   (0xffffd700);
+static const juce::Colour COL_PRP   (0xffaa88ff);
+static const juce::Colour COL_TXT   (0xfff3f7fc);
+static const juce::Colour COL_MUT   (0xffb8c8dc);
+static const juce::Colour COL_CARD  (0xff1c2533);
 // This palette is intentionally centralized so visual tuning can happen in one place.
 // If you want to re-theme the app, start by editing these constants.
 
-// Increase this to make all UI text larger globally.
-static constexpr float UI_FONT_SCALE = 1.18f;
-static float fs(float px) noexcept { return px * UI_FONT_SCALE; }
+namespace
+{
+constexpr float limiterThreshold = 0.965f;
+constexpr float clipDetectThreshold = 0.999f;
+constexpr std::array<const char*, 6> channelShortNames { "FL", "FR", "FC", "LFE", "SL", "SR" };
+
+juce::Colour getChannelUiColour(int ch)
+{
+    static const std::array<juce::Colour, 6> colours
+    {
+        juce::Colour(0xff00cfff), // FL
+        juce::Colour(0xff00cfff), // FR
+        juce::Colour(0xff00e896), // FC
+        juce::Colour(0xffffd700), // LFE
+        juce::Colour(0xffff5e00), // SL
+        juce::Colour(0xffff5e00)  // SR
+    };
+
+    if (juce::isPositiveAndBelow(ch, (int)colours.size()))
+        return colours[(size_t)ch];
+    return COL_ACC;
+}
+
+float readFloatProperty(const juce::var& objectVar, const juce::Identifier& property, float fallback)
+{
+    if (const auto* obj = objectVar.getDynamicObject())
+    {
+        const auto value = obj->getProperty(property);
+        if (value.isInt() || value.isInt64() || value.isDouble() || value.isBool())
+            return static_cast<float>(double(value));
+    }
+    return fallback;
+}
+
+int readIntProperty(const juce::var& objectVar, const juce::Identifier& property, int fallback)
+{
+    if (const auto* obj = objectVar.getDynamicObject())
+    {
+        const auto value = obj->getProperty(property);
+        if (value.isInt() || value.isInt64() || value.isDouble() || value.isBool())
+            return int(value);
+    }
+    return fallback;
+}
+
+bool readBoolProperty(const juce::var& objectVar, const juce::Identifier& property, bool fallback)
+{
+    if (const auto* obj = objectVar.getDynamicObject())
+    {
+        const auto value = obj->getProperty(property);
+        if (value.isBool())
+            return bool(value);
+        if (value.isInt() || value.isInt64() || value.isDouble())
+            return int(value) != 0;
+    }
+    return fallback;
+}
+
+juce::String readStringProperty(const juce::var& objectVar, const juce::Identifier& property,
+                                const juce::String& fallback = {})
+{
+    if (const auto* obj = objectVar.getDynamicObject())
+    {
+        const auto value = obj->getProperty(property);
+        if (value.isString())
+            return value.toString();
+    }
+    return fallback;
+}
+
+juce::var upmixParamsToVar(const UpmixParams& p)
+{
+    auto* paramsObj = new juce::DynamicObject();
+    paramsObj->setProperty("frontGain", p.frontGain);
+    paramsObj->setProperty("centerGain", p.centerGain);
+    paramsObj->setProperty("centerHPF", p.centerHPF);
+    paramsObj->setProperty("lfeGain", p.lfeGain);
+    paramsObj->setProperty("lfeCrossover", p.lfeCrossover);
+    paramsObj->setProperty("lfeShelfGain", p.lfeShelfGain);
+    paramsObj->setProperty("exciterDrive", p.exciterDrive);
+    paramsObj->setProperty("surroundGain", p.surroundGain);
+    paramsObj->setProperty("haasDelayMs", p.haasDelayMs);
+    paramsObj->setProperty("surroundHPF", p.surroundHPF);
+    paramsObj->setProperty("sideBlend", p.sideBlend);
+    paramsObj->setProperty("midBlend", p.midBlend);
+    paramsObj->setProperty("reverbWet", p.reverbWet);
+    paramsObj->setProperty("roomSize", p.roomSize);
+    paramsObj->setProperty("velvetDensity", p.velvetDensity);
+    return juce::var(paramsObj);
+}
+
+UpmixParams upmixParamsFromVar(const juce::var& paramsVar, const UpmixParams& fallback)
+{
+    UpmixParams p = fallback;
+    p.frontGain = readFloatProperty(paramsVar, "frontGain", p.frontGain);
+    p.centerGain = readFloatProperty(paramsVar, "centerGain", p.centerGain);
+    p.centerHPF = readFloatProperty(paramsVar, "centerHPF", p.centerHPF);
+    p.lfeGain = readFloatProperty(paramsVar, "lfeGain", p.lfeGain);
+    p.lfeCrossover = readFloatProperty(paramsVar, "lfeCrossover", p.lfeCrossover);
+    p.lfeShelfGain = readFloatProperty(paramsVar, "lfeShelfGain", p.lfeShelfGain);
+    p.exciterDrive = readFloatProperty(paramsVar, "exciterDrive", p.exciterDrive);
+    p.surroundGain = readFloatProperty(paramsVar, "surroundGain", p.surroundGain);
+    p.haasDelayMs = readFloatProperty(paramsVar, "haasDelayMs", p.haasDelayMs);
+    p.surroundHPF = readFloatProperty(paramsVar, "surroundHPF", p.surroundHPF);
+    p.sideBlend = readFloatProperty(paramsVar, "sideBlend", p.sideBlend);
+    p.midBlend = readFloatProperty(paramsVar, "midBlend", p.midBlend);
+    p.reverbWet = readFloatProperty(paramsVar, "reverbWet", p.reverbWet);
+    p.roomSize = readFloatProperty(paramsVar, "roomSize", p.roomSize);
+    p.velvetDensity = readFloatProperty(paramsVar, "velvetDensity", p.velvetDensity);
+    return p;
+}
+
+bool writeJsonFile(const juce::File& file, const juce::var& rootVar)
+{
+    auto parent = file.getParentDirectory();
+    if (!parent.exists() && !parent.createDirectory())
+        return false;
+
+    return file.replaceWithText(juce::JSON::toString(rootVar, true));
+}
+
+bool readJsonFile(const juce::File& file, juce::var& outVar)
+{
+    if (!file.existsAsFile())
+        return false;
+
+    auto parsed = juce::JSON::parse(file);
+    if (parsed.isVoid())
+        return false;
+
+    outVar = parsed;
+    return true;
+}
+
+void applySafetyLimiter(juce::AudioBuffer<float>& buffer,
+                        int numChannels,
+                        int numSamples,
+                        float threshold,
+                        float releaseCoeff,
+                        float& gainState,
+                        float& reductionDbOut,
+                        int& clipHoldBlocks)
+{
+    if (numChannels <= 0 || numSamples <= 0)
+    {
+        reductionDbOut = 0.0f;
+        clipHoldBlocks = juce::jmax(0, clipHoldBlocks - 1);
+        return;
+    }
+
+    float peak = 0.0f;
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        const float* data = buffer.getReadPointer(ch);
+        for (int i = 0; i < numSamples; ++i)
+            peak = juce::jmax(peak, std::abs(data[i]));
+    }
+
+    const float targetGain = peak > threshold ? (threshold / peak) : 1.0f;
+    if (targetGain < gainState)
+    {
+        gainState = targetGain; // fast attack to prevent overs.
+    }
+    else
+    {
+        const float clampedRelease = juce::jlimit(0.0f, 0.999999f, releaseCoeff);
+        const float releasePow = std::pow(clampedRelease, float(numSamples));
+        gainState = targetGain + (gainState - targetGain) * releasePow;
+    }
+
+    gainState = juce::jlimit(0.02f, 1.0f, gainState);
+    if (gainState < 0.9999f)
+        buffer.applyGain(0, numSamples, gainState);
+
+    const float gainDb = juce::Decibels::gainToDecibels(gainState, -120.0f);
+    reductionDbOut = juce::jmax(0.0f, -gainDb);
+
+    if (peak >= clipDetectThreshold)
+        clipHoldBlocks = juce::jmax(clipHoldBlocks, 15);
+    else
+        clipHoldBlocks = juce::jmax(0, clipHoldBlocks - 1);
+}
+} // namespace
 
 //==============================================================================
 //  UPMIX ENGINE
@@ -40,8 +221,9 @@ void UpmixEngine::prepare(double sampleRate, int blockSize)
 {
     // Store runtime format used by filter/delay calculations.
     sr = sampleRate;
+    maxBlockSize = juce::jmax(1, blockSize);
     spec.sampleRate       = sampleRate;
-    spec.maximumBlockSize = (juce::uint32)blockSize;
+    spec.maximumBlockSize = (juce::uint32)maxBlockSize;
     spec.numChannels      = 1;
 
     // Prepare all mono-path filters.
@@ -68,6 +250,37 @@ void UpmixEngine::prepare(double sampleRate, int blockSize)
     graphPrepared = true;
     lastRoomSize = lastDensity = lastReverbWet = -1.f;
 
+    // Pre-allocate all temporary processing buffers to keep process() allocation-free.
+    scratchMid.setSize(1, maxBlockSize, false, false, true);
+    scratchSide.setSize(1, maxBlockSize, false, false, true);
+    scratchFC.setSize(1, maxBlockSize, false, false, true);
+    scratchLFE.setSize(1, maxBlockSize, false, false, true);
+    scratchSurr.setSize(1, maxBlockSize, false, false, true);
+    scratchSL.setSize(1, maxBlockSize, false, false, true);
+    scratchSR.setSize(1, maxBlockSize, false, false, true);
+    scratchSLConv.setSize(1, maxBlockSize, false, false, true);
+    scratchSRConv.setSize(1, maxBlockSize, false, false, true);
+
+    // Parameter smoothing to remove zipper noise while dragging controls.
+    constexpr double rampSeconds = 0.04;
+    frontGainSmoothed.reset(sampleRate, rampSeconds);
+    centerGainSmoothed.reset(sampleRate, rampSeconds);
+    lfeGainSmoothed.reset(sampleRate, rampSeconds);
+    surroundGainSmoothed.reset(sampleRate, rampSeconds);
+    sideBlendSmoothed.reset(sampleRate, rampSeconds);
+    midBlendSmoothed.reset(sampleRate, rampSeconds);
+    reverbWetSmoothed.reset(sampleRate, rampSeconds);
+    roomSizeSmoothed.reset(sampleRate, rampSeconds);
+
+    frontGainSmoothed.setCurrentAndTargetValue(params.frontGain);
+    centerGainSmoothed.setCurrentAndTargetValue(params.centerGain);
+    lfeGainSmoothed.setCurrentAndTargetValue(params.lfeGain);
+    surroundGainSmoothed.setCurrentAndTargetValue(params.surroundGain);
+    sideBlendSmoothed.setCurrentAndTargetValue(params.sideBlend);
+    midBlendSmoothed.setCurrentAndTargetValue(params.midBlend);
+    reverbWetSmoothed.setCurrentAndTargetValue(params.reverbWet);
+    roomSizeSmoothed.setCurrentAndTargetValue(params.roomSize);
+
     // Build initial graph from current parameter values.
     rebuildFilters();
     rebuildVelvetIRs();
@@ -89,6 +302,15 @@ void UpmixEngine::reset()
     srDelay.reset();
     slConv.reset();
     srConv.reset();
+
+    frontGainSmoothed.setCurrentAndTargetValue(params.frontGain);
+    centerGainSmoothed.setCurrentAndTargetValue(params.centerGain);
+    lfeGainSmoothed.setCurrentAndTargetValue(params.lfeGain);
+    surroundGainSmoothed.setCurrentAndTargetValue(params.surroundGain);
+    sideBlendSmoothed.setCurrentAndTargetValue(params.sideBlend);
+    midBlendSmoothed.setCurrentAndTargetValue(params.midBlend);
+    reverbWetSmoothed.setCurrentAndTargetValue(params.reverbWet);
+    roomSizeSmoothed.setCurrentAndTargetValue(params.roomSize);
 }
 
 // Rebuilds coefficient-based DSP nodes when relevant controls change.
@@ -208,6 +430,15 @@ void UpmixEngine::process(const juce::AudioBuffer<float>& stereoIn,
     jassert(sixChOut.getNumChannels() >= 6);
     jassert(sixChOut.getNumSamples()  >= numSamples);
 
+    if (numSamples > maxBlockSize)
+    {
+        // Keep audio thread allocation-free; this should not happen when prepare() was called
+        // with the current device block size.
+        jassertfalse;
+        sixChOut.clear();
+        return;
+    }
+
     sixChOut.clear();
 
     // Rebuild DSP blocks when parameter groups change.
@@ -226,6 +457,15 @@ void UpmixEngine::process(const juce::AudioBuffer<float>& stereoIn,
     }
     prevParams = params;
 
+    frontGainSmoothed.setTargetValue(params.frontGain);
+    centerGainSmoothed.setTargetValue(params.centerGain);
+    lfeGainSmoothed.setTargetValue(params.lfeGain);
+    surroundGainSmoothed.setTargetValue(params.surroundGain);
+    sideBlendSmoothed.setTargetValue(params.sideBlend);
+    midBlendSmoothed.setTargetValue(params.midBlend);
+    reverbWetSmoothed.setTargetValue(params.reverbWet);
+    roomSizeSmoothed.setTargetValue(params.roomSize);
+
     const float* inL = stereoIn.getReadPointer(0);
     const float* inR = stereoIn.getReadPointer(1);
 
@@ -239,94 +479,83 @@ void UpmixEngine::process(const juce::AudioBuffer<float>& stereoIn,
     if (!surround51Active)
     {
         // Stereo mode: direct FL/FR passthrough only.
-        juce::FloatVectorOperations::copy(outFL, inL, numSamples);
-        juce::FloatVectorOperations::copy(outFR, inR, numSamples);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float g = frontGainSmoothed.getNextValue();
+            outFL[i] = inL[i] * g;
+            outFR[i] = inR[i] * g;
+        }
         // Remaining channels stay silent.
         return;
     }
 
     // 5.1 upmix mode signal flow.
 
-    // Working mono buffers for each branch in the processing graph.
-    juce::AudioBuffer<float> midBuf(1, numSamples);
-    juce::AudioBuffer<float> sideBuf(1, numSamples);
-    juce::AudioBuffer<float> fcBuf(1, numSamples);
-    juce::AudioBuffer<float> lfeBuf(1, numSamples);
-    juce::AudioBuffer<float> surrBuf(1, numSamples);
-    juce::AudioBuffer<float> slBuf(1, numSamples);
-    juce::AudioBuffer<float> srBuf(1, numSamples);
-    juce::AudioBuffer<float> slConvOut(1, numSamples);
-    juce::AudioBuffer<float> srConvOut(1, numSamples);
+    float* mid  = scratchMid.getWritePointer(0);
+    float* side = scratchSide.getWritePointer(0);
 
-    float* mid  = midBuf.getWritePointer(0);
-    float* side = sideBuf.getWritePointer(0);
-
-    // Mid/Side extraction from stereo input.
+    // Mid/Side extraction from stereo input + smoothed front gain.
     for (int i = 0; i < numSamples; i++)
     {
+        const float frontG = frontGainSmoothed.getNextValue();
+        outFL[i] = inL[i] * frontG;
+        outFR[i] = inR[i] * frontG;
+
         mid[i]  = (inL[i] + inR[i]) * 0.5f;
         side[i] = (inL[i] - inR[i]) * 0.5f;
     }
 
-    // FL/FR keep full original stereo.
-    juce::FloatVectorOperations::copyWithMultiply(outFL, inL, params.frontGain, numSamples);
-    juce::FloatVectorOperations::copyWithMultiply(outFR, inR, params.frontGain, numSamples);
-
     // FC path: Mid -> high-pass -> gain -> center.
     {
-        fcBuf.copyFrom(0, 0, midBuf, 0, 0, numSamples);
-        juce::dsp::AudioBlock<float> blk(fcBuf);
+        scratchFC.copyFrom(0, 0, scratchMid, 0, 0, numSamples);
+        juce::dsp::AudioBlock<float> blk(scratchFC);
         juce::dsp::ProcessContextReplacing<float> ctx(blk);
         fcHPF.process(ctx);
-        juce::FloatVectorOperations::copyWithMultiply(outFC,
-            fcBuf.getReadPointer(0), params.centerGain, numSamples);
+
+        const float* fcIn = scratchFC.getReadPointer(0);
+        for (int i = 0; i < numSamples; ++i)
+            outFC[i] = fcIn[i] * centerGainSmoothed.getNextValue();
     }
 
     // LFE path: Mid -> LR4 crossover -> shelf -> exciter -> gain.
     {
-        lfeBuf.copyFrom(0, 0, midBuf, 0, 0, numSamples);
+        scratchLFE.copyFrom(0, 0, scratchMid, 0, 0, numSamples);
 
-        juce::dsp::AudioBlock<float> blk(lfeBuf);
+        juce::dsp::AudioBlock<float> blk(scratchLFE);
         juce::dsp::ProcessContextReplacing<float> ctx(blk);
         lfeLP1.process(ctx);    // 1st 2nd-order Butterworth LPF
         lfeLP2.process(ctx);    // 2nd 2nd-order stage -> LR4 total
         lfeShelf.process(ctx);  // Low shelf boost
 
-        float* lfePtr = lfeBuf.getWritePointer(0);
+        float* lfePtr = scratchLFE.getWritePointer(0);
         float  drive  = params.exciterDrive;
         for (int i = 0; i < numSamples; i++)
-            lfePtr[i] = std::tanh(excite(lfePtr[i], drive));
-
-        juce::FloatVectorOperations::copyWithMultiply(outLFE,
-            lfeBuf.getReadPointer(0), params.lfeGain, numSamples);
+            outLFE[i] = std::tanh(excite(lfePtr[i], drive)) * lfeGainSmoothed.getNextValue();
     }
 
     // Surround source: side * blend + mid * midBlend.
     {
-        float* surr = surrBuf.getWritePointer(0);
+        float* surr = scratchSurr.getWritePointer(0);
         for (int i = 0; i < numSamples; i++)
-            surr[i] = side[i] * params.sideBlend
-                    + mid[i]  * params.midBlend;
+            surr[i] = side[i] * sideBlendSmoothed.getNextValue()
+                    + mid[i]  * midBlendSmoothed.getNextValue();
     }
 
-    const float wet = std::pow(juce::jlimit(0.f, 1.f, params.reverbWet), 0.65f);
-    const float dry = 1.f - wet;
-    const float roomBoost = 0.65f + params.roomSize * 0.55f;
     const float densityNorm = juce::jlimit(0.f, 1.f, (params.velvetDensity - 500.0f) / 3500.0f);
     const float decorCross = 0.05f + densityNorm * 0.32f;
 
     // SL path: surround source -> HPF -> Haas delay -> velvet convolution.
     {
-        slBuf.copyFrom(0, 0, surrBuf, 0, 0, numSamples);
+        scratchSL.copyFrom(0, 0, scratchSurr, 0, 0, numSamples);
 
         {
-            juce::dsp::AudioBlock<float> blk(slBuf);
+            juce::dsp::AudioBlock<float> blk(scratchSL);
             juce::dsp::ProcessContextReplacing<float> ctx(blk);
             slHPF.process(ctx);
         }
 
         // Haas delay
-        float* slPtr = slBuf.getWritePointer(0);
+        float* slPtr = scratchSL.getWritePointer(0);
         for (int i = 0; i < numSamples; i++)
         {
             slDelay.pushSample(0, slPtr[i]);
@@ -334,48 +563,60 @@ void UpmixEngine::process(const juce::AudioBuffer<float>& stereoIn,
         }
 
         // Velvet noise convolution (decorrelation)
-        slConvOut.copyFrom(0, 0, slBuf, 0, 0, numSamples);
+        scratchSLConv.copyFrom(0, 0, scratchSL, 0, 0, numSamples);
         {
-            juce::dsp::AudioBlock<float> blk(slConvOut);
+            juce::dsp::AudioBlock<float> blk(scratchSLConv);
             juce::dsp::ProcessContextReplacing<float> ctx(blk);
             slConv.process(ctx);
         }
 
         // Wet/dry blend
-        const float* slDry = slBuf.getReadPointer(0);
-        const float* slWet = slConvOut.getReadPointer(0);
+        const float* slDry = scratchSL.getReadPointer(0);
+        const float* slWet = scratchSLConv.getReadPointer(0);
         for (int i = 0; i < numSamples; i++)
+        {
+            const float wetRaw = reverbWetSmoothed.getNextValue();
+            const float wet = std::pow(juce::jlimit(0.0f, 1.0f, wetRaw), 0.65f);
+            const float dry = 1.0f - wet;
+            const float roomBoost = 0.65f + roomSizeSmoothed.getNextValue() * 0.55f;
             outSL[i] = (slDry[i] * dry + (slWet[i] * roomBoost) * wet);
+        }
     }
 
     // SR path: same as SL with separate IR and extra delay.
     {
-        srBuf.copyFrom(0, 0, surrBuf, 0, 0, numSamples);
+        scratchSR.copyFrom(0, 0, scratchSurr, 0, 0, numSamples);
 
         {
-            juce::dsp::AudioBlock<float> blk(srBuf);
+            juce::dsp::AudioBlock<float> blk(scratchSR);
             juce::dsp::ProcessContextReplacing<float> ctx(blk);
             srHPF.process(ctx);
         }
 
-        float* srPtr = srBuf.getWritePointer(0);
+        float* srPtr = scratchSR.getWritePointer(0);
         for (int i = 0; i < numSamples; i++)
         {
             srDelay.pushSample(0, srPtr[i]);
             srPtr[i] = srDelay.popSample(0);
         }
 
-        srConvOut.copyFrom(0, 0, srBuf, 0, 0, numSamples);
+        scratchSRConv.copyFrom(0, 0, scratchSR, 0, 0, numSamples);
         {
-            juce::dsp::AudioBlock<float> blk(srConvOut);
+            juce::dsp::AudioBlock<float> blk(scratchSRConv);
             juce::dsp::ProcessContextReplacing<float> ctx(blk);
             srConv.process(ctx);
         }
 
-        const float* srDry = srBuf.getReadPointer(0);
-        const float* srWet = srConvOut.getReadPointer(0);
+        const float* srDry = scratchSR.getReadPointer(0);
+        const float* srWet = scratchSRConv.getReadPointer(0);
         for (int i = 0; i < numSamples; i++)
+        {
+            const float wetRaw = reverbWetSmoothed.getNextValue();
+            const float wet = std::pow(juce::jlimit(0.0f, 1.0f, wetRaw), 0.65f);
+            const float dry = 1.0f - wet;
+            const float roomBoost = 0.65f + roomSizeSmoothed.getNextValue() * 0.55f;
             outSR[i] = (srDry[i] * dry + (srWet[i] * roomBoost) * wet);
+        }
     }
 
     // Stereo surround decorrelation matrix:
@@ -384,8 +625,9 @@ void UpmixEngine::process(const juce::AudioBuffer<float>& stereoIn,
     {
         const float sl = outSL[i];
         const float srChan = outSR[i];
-        outSL[i] = (sl - srChan * decorCross) * params.surroundGain;
-        outSR[i] = (srChan - sl * decorCross) * params.surroundGain;
+        const float g = surroundGainSmoothed.getNextValue();
+        outSL[i] = (sl - srChan * decorCross) * g;
+        outSR[i] = (srChan - sl * decorCross) * g;
     }
 }
 
@@ -399,9 +641,11 @@ StudioLookAndFeel::StudioLookAndFeel()
     setColour(juce::Slider::trackColourId,          COL_BG3);
     setColour(juce::Slider::backgroundColourId,     COL_BG2);
     setColour(juce::Label::textColourId,            COL_TXT);
-    setColour(juce::TextButton::buttonColourId,     COL_PANEL);
+    setColour(juce::TextButton::buttonColourId,     COL_CARD);
     setColour(juce::TextButton::textColourOffId,    COL_TXT);
     setColour(juce::ComboBox::backgroundColourId,   COL_BG2);
+    setColour(juce::ScrollBar::thumbColourId,       COL_BG3.brighter(0.2f));
+    setColour(juce::ScrollBar::trackColourId,       COL_BG2);
 }
 
 // Draws horizontal sliders with a glowing fill + round thumb.
@@ -417,23 +661,40 @@ void StudioLookAndFeel::drawLinearSlider(juce::Graphics& g,
         accent = juce::Colour::fromString(v->toString());
 
     const float centreY = float(y) + float(h) * 0.5f;
-    const float trackH = juce::jlimit(4.0f, 6.0f, float(h) * 0.32f);
-    auto trackBounds = juce::Rectangle<float>(float(x), centreY - trackH * 0.5f, float(w), trackH);
-    g.setColour(COL_BG3.withAlpha(0.82f));
+    const float trackH = 3.5f;
+    const float trackY = centreY - trackH * 0.5f;
+    auto trackBounds = juce::Rectangle<float>(float(x), trackY, float(w), trackH);
+
+    // Track background
+    g.setColour(COL_BG3.withAlpha(0.90f));
     g.fillRoundedRectangle(trackBounds, trackH * 0.5f);
 
-    auto fill = trackBounds.withWidth(juce::jlimit(0.0f, trackBounds.getWidth(), sliderPos - float(x)));
-    juce::ColourGradient fg(accent.withAlpha(0.96f), fill.getX(), fill.getY(),
-                            accent.withAlpha(0.72f), fill.getRight(), fill.getBottom(), false);
-    g.setGradientFill(fg);
-    g.fillRoundedRectangle(fill, trackH * 0.5f);
+    // Filled region
+    float fillW = juce::jlimit(0.0f, trackBounds.getWidth(), sliderPos - float(x));
+    if (fillW > 0.0f)
+    {
+        auto fill = trackBounds.withWidth(fillW);
+        // Subtle glow beneath the fill
+        g.setColour(accent.withAlpha(0.18f));
+        g.fillRoundedRectangle(fill.expanded(0.f, 2.5f), 3.5f);
+        // Main gradient fill
+        juce::ColourGradient fg(accent.withAlpha(0.55f), fill.getX(), fill.getY(),
+                                accent.withAlpha(0.95f), fill.getRight(), fill.getBottom(), false);
+        g.setGradientFill(fg);
+        g.fillRoundedRectangle(fill, trackH * 0.5f);
+    }
 
-    g.setColour(accent.withAlpha(0.24f));
-    g.fillEllipse(sliderPos - 7.0f, centreY - 7.0f, 14.f, 14.f);
+    // Thumb: outer glow ring
+    const float thumbR = 7.5f;
+    g.setColour(accent.withAlpha(0.22f));
+    g.fillEllipse(sliderPos - thumbR - 2.0f, centreY - thumbR - 2.0f,
+                  (thumbR + 2.0f) * 2.0f, (thumbR + 2.0f) * 2.0f);
+    // Thumb body
     g.setColour(accent);
-    g.fillEllipse(sliderPos - 4.6f, centreY - 4.6f, 9.2f, 9.2f);
-    g.setColour(juce::Colours::white.withAlpha(0.80f));
-    g.fillEllipse(sliderPos - 1.6f, centreY - 1.6f, 3.2f, 3.2f);
+    g.fillEllipse(sliderPos - thumbR, centreY - thumbR, thumbR * 2.0f, thumbR * 2.0f);
+    // Thumb inner highlight
+    g.setColour(juce::Colours::white.withAlpha(0.85f));
+    g.fillEllipse(sliderPos - 2.5f, centreY - 2.5f, 5.0f, 5.0f);
 }
 
 // Draws rotary sliders (used if a control switches to rotary style in future).
@@ -482,15 +743,16 @@ ParamSlider::ParamSlider(const juce::String& label, float minVal, float maxVal,
     slider.getProperties().set("accent", accent.toString());
 
     nameLabel.setText(label, juce::dontSendNotification);
-    nameLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.92f));
-    nameLabel.setFont(juce::Font(juce::FontOptions("Segoe UI", fs(13.f), juce::Font::plain)));
+    nameLabel.setColour(juce::Label::textColourId, COL_TXT.withAlpha(0.80f));
+    nameLabel.setFont(juce::Font(juce::FontOptions("Consolas", 12.5f, juce::Font::plain)));
 
-    valueLabel.setColour(juce::Label::textColourId, accent.brighter(0.2f));
-    valueLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
-    valueLabel.setColour(juce::Label::outlineColourId, juce::Colours::transparentBlack);
-    valueLabel.setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(14.f), juce::Font::bold)));
-    valueLabel.setJustificationType(juce::Justification::centredRight);
-    valueLabel.setBorderSize({ 0, 0, 0, 0 });
+    // Value label styled as a colored badge
+    valueLabel.setColour(juce::Label::textColourId, accent.brighter(0.25f));
+    valueLabel.setColour(juce::Label::backgroundColourId, accent.withAlpha(0.10f));
+    valueLabel.setColour(juce::Label::outlineColourId, accent.withAlpha(0.40f));
+    valueLabel.setFont(juce::Font(juce::FontOptions("Consolas", 12.5f, juce::Font::bold)));
+    valueLabel.setJustificationType(juce::Justification::centred);
+    valueLabel.setBorderSize({ 2, 6, 2, 6 });
 
     slider.onValueChange = [this] { sliderChanged(); };
     sliderChanged();  // set initial label
@@ -504,12 +766,16 @@ ParamSlider::ParamSlider(const juce::String& label, float minVal, float maxVal,
 void ParamSlider::resized()
 {
     auto b = getLocalBounds();
-    const int topH = juce::jlimit(16, 24, getHeight() / 2);
+    // Reserve less space for labels so the slider lane has enough height
+    // to render the same thumb style as the master level control.
+    const int topH = juce::jlimit(16, 18, int(float(getHeight()) * 0.40f));
     auto top = b.removeFromTop(topH);
-    auto valueW = juce::jlimit(74, 120, b.getWidth() / 4);
-    nameLabel.setBounds(top.removeFromLeft(top.getWidth() - valueW));
-    valueLabel.setBounds(top.reduced(0, 1));
-    slider.setBounds(b.reduced(0, juce::jmax(1, topH / 6)));
+    // Value badge: fixed width on right, visually balanced
+    const int valueW = juce::jlimit(68, 106, b.getWidth() / 4);
+    valueLabel.setBounds(top.removeFromRight(valueW).reduced(0, 1));
+    top.removeFromRight(4);
+    nameLabel.setBounds(top);
+    slider.setBounds(b.reduced(0, juce::jmax(1, topH / 7)));
 }
 
 // Formats and displays current value text, then notifies caller.
@@ -547,38 +813,74 @@ void ModeButton::paintButton(juce::Graphics& g, bool hover, bool)
     auto b = getLocalBounds().toFloat().reduced(1.0f);
     const bool active = getToggleState();
 
-    const auto title = getButtonText().upToFirstOccurrenceOf("\n", false, false);
+    const auto title    = getButtonText().upToFirstOccurrenceOf("\n", false, false);
     const auto subtitle = getButtonText().fromFirstOccurrenceOf("\n", false, false).trim();
 
-    auto base = active ? colour.withAlpha(0.14f) : COL_BG2.withAlpha(0.90f);
+    // Card background
+    juce::ColourGradient grad(
+        active ? colour.withAlpha(0.13f) : COL_BG2.withAlpha(0.80f), b.getX(), b.getY(),
+        active ? colour.withAlpha(0.06f) : COL_BG2.withAlpha(0.55f), b.getX(), b.getBottom(), false);
     if (hover && !active)
-        base = base.brighter(0.05f);
+        grad = juce::ColourGradient(COL_BG2.brighter(0.06f), b.getX(), b.getY(),
+                                    COL_BG2.withAlpha(0.65f),  b.getX(), b.getBottom(), false);
+    g.setGradientFill(grad);
+    g.fillRoundedRectangle(b, 9.0f);
 
-    g.setColour(base);
-    g.fillRoundedRectangle(b, 8.0f);
+    // Border: glowing cyan when active
+    if (active)
+    {
+        g.setColour(colour.withAlpha(0.30f));
+        g.drawRoundedRectangle(b.expanded(1.0f), 10.0f, 2.0f);
+    }
+    g.setColour(active ? colour.withAlpha(0.90f) : COL_BRDR.withAlpha(0.70f));
+    g.drawRoundedRectangle(b, 9.0f, active ? 1.5f : 1.0f);
 
-    g.setColour(active ? colour.withAlpha(0.70f) : COL_BRDR.withAlpha(0.65f));
-    g.drawRoundedRectangle(b, 8.0f, active ? 1.1f : 0.9f);
+    // Inner sheen
+    auto sheen = b.reduced(1.0f).withHeight(b.getHeight() * 0.45f);
+    g.setColour(juce::Colours::white.withAlpha(active ? 0.055f : 0.035f));
+    g.fillRoundedRectangle(sheen, 8.0f);
 
-    auto content = b.toNearestInt().reduced(12, 7);
-    auto badge = content.removeFromRight(44).reduced(0, 4);
+    auto content = b.reduced(14.f, 8.f);
 
-    auto titleRow = content.removeFromTop(content.getHeight() / 2 + 1);
-    g.setColour(juce::Colours::white.withAlpha(active ? 1.0f : 0.90f));
-    g.setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(15.0f * 0.80f), juce::Font::bold)));
-    g.drawFittedText(title, titleRow, juce::Justification::centredLeft, 1);
+    // Dot indicator (left side)
+    const float dotR = 4.5f;
+    const float dotX = content.getX();
+    const float dotY = content.getCentreY();
+    if (active)
+    {
+        g.setColour(colour.withAlpha(0.25f));
+        g.fillEllipse(dotX - dotR * 1.6f, dotY - dotR * 1.6f, dotR * 3.2f, dotR * 3.2f);
+    }
+    g.setColour(colour.withAlpha(active ? 1.0f : 0.35f));
+    g.fillEllipse(dotX - dotR, dotY - dotR, dotR * 2.0f, dotR * 2.0f);
 
-    g.setColour(COL_MUT.brighter(0.15f));
-    g.setFont(juce::Font(juce::FontOptions("Segoe UI", fs(10.0f), juce::Font::plain)));
-    g.drawFittedText(subtitle, content, juce::Justification::centredLeft, 1);
+    content.removeFromLeft(int(dotR * 2.0f + 8.0f));
 
-    g.setColour(COL_BG0.withAlpha(0.55f));
-    g.fillRoundedRectangle(badge.toFloat(), 6.0f);
-    g.setColour(active ? colour.withAlpha(0.58f) : COL_BRDR.withAlpha(0.58f));
-    g.drawRoundedRectangle(badge.toFloat(), 6.0f, 0.9f);
-    g.setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(10.5f), juce::Font::bold)));
-    g.setColour(juce::Colours::white.withAlpha(active ? 0.95f : 0.80f));
-    g.drawFittedText(title.containsIgnoreCase("stereo") ? "2.0" : "5.1", badge, juce::Justification::centred, 1);
+    // Badge on the right (2.0 / 5.1)
+    const bool isStereoBtn = title.containsIgnoreCase("stereo");
+    const juce::String badgeText = isStereoBtn ? "2.0" : "5.1";
+    const int badgeW = 38;
+    auto badge = content.removeFromRight(badgeW).reduced(0.f, 4.0f);
+    g.setColour(COL_BG0.withAlpha(0.70f));
+    g.fillRoundedRectangle(badge, 6.0f);
+    g.setColour(active ? colour.withAlpha(0.85f) : COL_BRDR.withAlpha(0.65f));
+    g.drawRoundedRectangle(badge, 6.0f, 1.0f);
+    g.setFont(juce::Font(juce::FontOptions("Consolas", 11.5f, juce::Font::bold)));
+    g.setColour(active ? colour.brighter(0.15f) : COL_MUT.brighter(0.25f));
+    g.drawFittedText(badgeText, badge.toNearestInt(), juce::Justification::centred, 1);
+
+    content.removeFromRight(6);
+
+    // Title
+    auto titleRow = content.removeFromTop(content.getHeight() * 0.56f);
+    g.setColour(juce::Colours::white.withAlpha(active ? 1.0f : 0.82f));
+    g.setFont(juce::Font(juce::FontOptions("Consolas", 13.5f, juce::Font::bold)));
+    g.drawFittedText(title, titleRow.toNearestInt(), juce::Justification::centredLeft, 1);
+
+    // Subtitle
+    g.setColour(COL_MUT.brighter(active ? 0.30f : 0.10f));
+    g.setFont(juce::Font(juce::FontOptions("Consolas", 10.0f, juce::Font::plain)));
+    g.drawFittedText(subtitle, content.toNearestInt(), juce::Justification::centredLeft, 1);
 }
 
 //==============================================================================
@@ -616,34 +918,60 @@ void ChannelMeter::timerCallback()
 void ChannelMeter::paint(juce::Graphics& g)
 {
     auto b = getLocalBounds().toFloat();
-    auto barArea = b.reduced(2.f).withTrimmedBottom(16.f);
+    const int labelH = 16;
+    auto barArea = b.reduced(2.f).withTrimmedBottom(float(labelH));
 
-    g.setColour(COL_BG3);
+    // Track background
+    g.setColour(COL_BG3.withAlpha(0.75f));
     g.fillRoundedRectangle(barArea, 3.f);
 
     float fillH = juce::jlimit(0.f, 1.f, level * 4.f);
-    auto fill = barArea.withTop(barArea.getBottom() - fillH * barArea.getHeight());
-    g.setColour(col.withAlpha(0.85f));
-    g.fillRoundedRectangle(fill, 3.f);
+    float fillTop = barArea.getBottom() - fillH * barArea.getHeight();
+    auto fillArea = barArea.withTop(fillTop);
 
+    if (fillH > 0.001f)
+    {
+        // Gradient: cyan at bottom fades to white-cyan at top for high levels
+        juce::ColourGradient fillGrad(
+            col.withAlpha(0.88f),  fillArea.getX(), fillArea.getBottom(),
+            col.brighter(0.35f).withAlpha(0.95f), fillArea.getX(), fillArea.getY(), false);
+        if (fillH > 0.75f)
+            fillGrad = juce::ColourGradient(
+                col.withAlpha(0.88f),                  fillArea.getX(), fillArea.getBottom(),
+                juce::Colour(0xffff4444).withAlpha(0.90f), fillArea.getX(), fillArea.getY(), false);
+        g.setGradientFill(fillGrad);
+        g.fillRoundedRectangle(fillArea, 3.f);
+    }
+
+    // Subtle tick marks
+    g.setColour(COL_BG0.withAlpha(0.55f));
+    const int numTicks = 5;
+    for (int i = 1; i < numTicks; ++i)
+    {
+        float ty = barArea.getY() + barArea.getHeight() * (float(i) / float(numTicks));
+        g.drawHorizontalLine(int(ty), barArea.getX(), barArea.getRight());
+    }
+
+    // Focus glow
     if (focus > 0.001f)
     {
-        auto glow = barArea.expanded(2.f);
-        g.setColour(col.withAlpha(0.25f * focus));
-        g.drawRoundedRectangle(glow, 4.f, 2.4f);
-        g.setColour(juce::Colours::white.withAlpha(0.18f * focus));
-        g.drawRoundedRectangle(glow.reduced(1.f), 4.f, 1.0f);
+        g.setColour(col.withAlpha(0.30f * focus));
+        g.drawRoundedRectangle(barArea.expanded(2.0f), 5.f, 2.0f);
     }
 
     // Peak marker
-    float pkY = barArea.getBottom() - juce::jlimit(0.f,1.f,peak*4.f) * barArea.getHeight();
-    g.setColour(juce::Colours::white.withAlpha(0.7f));
-    g.fillRect(barArea.getX(), pkY, barArea.getWidth(), 1.5f);
+    float pkFrac = juce::jlimit(0.f, 1.f, peak * 4.f);
+    if (pkFrac > 0.01f)
+    {
+        float pkY = barArea.getBottom() - pkFrac * barArea.getHeight();
+        g.setColour(juce::Colours::white.withAlpha(0.75f));
+        g.fillRect(barArea.getX() + 1.f, pkY - 0.8f, barArea.getWidth() - 2.f, 1.6f);
+    }
 
     // Label
-    g.setColour(COL_MUT);
-    g.setFont(juce::Font(juce::FontOptions(fs(10.f))));
-    g.drawText(lbl, b.withTop(b.getBottom()-16.f).toNearestInt(),
+    g.setColour(col.withAlpha(0.85f));
+    g.setFont(juce::Font(juce::FontOptions("Consolas", 10.f, juce::Font::bold)));
+    g.drawText(lbl, b.withTop(b.getBottom() - float(labelH)).toNearestInt(),
                juce::Justification::centred);
 }
 
@@ -700,18 +1028,27 @@ void SpectrumDisplay::drawNextFrameOfSpectrum()
 void SpectrumDisplay::paint(juce::Graphics& g)
 {
     auto b = getLocalBounds().toFloat();
-    juce::ColourGradient bg(COL_BG1.brighter(0.08f), b.getX(), b.getY(),
-                            COL_BG2, b.getX(), b.getBottom(), false);
+
+    // Background
+    juce::ColourGradient bg(COL_BG2.withAlpha(0.95f), b.getX(), b.getY(),
+                            COL_BG0.withAlpha(0.98f), b.getX(), b.getBottom(), false);
     g.setGradientFill(bg);
-    g.fillRoundedRectangle(b, 6.f);
+    g.fillRoundedRectangle(b, 7.f);
 
     auto plot = b.reduced(6.f, 5.f);
 
-    g.setColour(COL_BG3.withAlpha(0.9f));
-    for (int i = 1; i <= 4; ++i)
+    // Horizontal dB grid lines
+    const char* dbLabels[] = { "0", "-6", "-12", "-18", "-24" };
+    for (int i = 0; i <= 4; ++i)
     {
-        float y = juce::jmap(float(i), 0.0f, 4.0f, plot.getBottom(), plot.getY());
+        float y = juce::jmap(float(i), 0.0f, 4.0f, plot.getY(), plot.getBottom());
+        g.setColour(COL_BG3.withAlpha(i == 0 ? 0.55f : 0.40f));
         g.drawHorizontalLine(int(y), plot.getX(), plot.getRight());
+        g.setColour(COL_MUT.withAlpha(0.50f));
+        g.setFont(juce::Font(juce::FontOptions("Consolas", 8.5f, juce::Font::plain)));
+        g.drawText(dbLabels[i],
+                   juce::Rectangle<int>(int(plot.getRight()) - 26, int(y) - 6, 24, 12),
+                   juce::Justification::centredRight);
     }
 
     juce::Path line, fill, peakLine;
@@ -742,14 +1079,42 @@ void SpectrumDisplay::paint(juce::Graphics& g)
     fill.lineTo(plot.getRight(), plot.getBottom());
     fill.closeSubPath();
 
-    g.setColour(accent.withAlpha(0.16f));
+    // Filled area gradient
+    juce::ColourGradient fillGrad(
+        accent.withAlpha(0.24f), plot.getX(), plot.getY(),
+        accent.withAlpha(0.06f), plot.getX(), plot.getBottom(), false);
+    g.setGradientFill(fillGrad);
     g.fillPath(fill);
-    g.setColour(accent.withAlpha(0.24f));
-    g.strokePath(line, juce::PathStrokeType(4.2f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    g.setColour(accent.withAlpha(0.95f));
+
+    // Glow stroke
+    g.setColour(accent.withAlpha(0.20f));
+    g.strokePath(line, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+    // Main stroke
+    g.setColour(accent.withAlpha(0.92f));
     g.strokePath(line, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    g.setColour(juce::Colours::white.withAlpha(0.45f));
+    // Peak trace
+    g.setColour(juce::Colours::white.withAlpha(0.38f));
     g.strokePath(peakLine, juce::PathStrokeType(1.0f));
+
+    // Frequency labels at bottom
+    const char* freqLabels[] = { "20", "50", "100", "200", "500", "1k", "2k", "5k", "10k", "20k" };
+    const float freqPositions[] = { 0.02f, 0.06f, 0.12f, 0.22f, 0.34f, 0.46f, 0.58f, 0.72f, 0.84f, 0.97f };
+    g.setColour(COL_MUT.withAlpha(0.45f));
+    g.setFont(juce::Font(juce::FontOptions("Consolas", 8.0f, juce::Font::plain)));
+    for (int i = 0; i < 10; ++i)
+    {
+        float lx = plot.getX() + freqPositions[i] * plot.getWidth();
+        g.drawVerticalLine(int(lx), plot.getBottom() - 3.0f, plot.getBottom());
+        g.drawText(freqLabels[i],
+                   juce::Rectangle<int>(int(lx) - 12, int(plot.getBottom()) - 14, 24, 10),
+                   juce::Justification::centred);
+    }
+    // Mode label top-right
+    g.setColour(isSurround ? COL_ORG.withAlpha(0.60f) : COL_ACC.withAlpha(0.60f));
+    g.setFont(juce::Font(juce::FontOptions("Consolas", 9.0f, juce::Font::bold)));
+    g.drawText(isSurround ? "5.1" : "2.0", 
+               juce::Rectangle<int>(int(plot.getRight()) - 26, int(plot.getY()), 24, 14),
+               juce::Justification::centredRight);
 }
 
 //==============================================================================
@@ -779,47 +1144,75 @@ void ChannelScopeDisplay::paint(juce::Graphics& g)
     static const char* labels[6] = { "FL", "FR", "FC", "LFE", "SL", "SR" };
     static const juce::Colour cols[6] =
     {
-        juce::Colour(0xff00cfff), juce::Colour(0xff00cfff), juce::Colour(0xff00e896),
-        juce::Colour(0xffffd700), juce::Colour(0xffff5e00), juce::Colour(0xffff5e00)
+        juce::Colour(0xff00c8ff), juce::Colour(0xff00c8ff), juce::Colour(0xff3fd8a0),
+        juce::Colour(0xffffc840), juce::Colour(0xffff7d30), juce::Colour(0xffff7d30)
     };
 
     auto b = getLocalBounds().toFloat();
-    g.setColour(COL_BG1.withAlpha(0.95f));
-    g.fillRoundedRectangle(b, 6.f);
 
-    auto lanes = b.reduced(4.f);
+    // Panel background
+    juce::ColourGradient panelBg(COL_BG2.withAlpha(0.92f), b.getX(), b.getY(),
+                                  COL_BG0.withAlpha(0.96f), b.getX(), b.getBottom(), false);
+    g.setGradientFill(panelBg);
+    g.fillRoundedRectangle(b, 7.f);
+    g.setColour(COL_BRDR.withAlpha(0.55f));
+    g.drawRoundedRectangle(b, 7.f, 1.0f);
+
+    auto lanes = b.reduced(5.f, 4.f);
     const float laneH = lanes.getHeight() / 6.0f;
 
     for (int ch = 0; ch < 6; ++ch)
     {
-        auto lane = lanes.removeFromTop(laneH).reduced(0.f, 1.f);
-        g.setColour(COL_BG3.withAlpha(0.68f));
+        auto lane = lanes.removeFromTop(laneH).reduced(0.f, 0.8f);
+        const auto c = cols[ch];
+        const bool active = latest[ch] > 0.02f;
+
+        // Lane background
+        g.setColour(COL_BG3.withAlpha(active ? 0.55f : 0.38f));
         g.fillRoundedRectangle(lane, 3.f);
 
+        // Label zone (left)
         auto leftLabel = lane.removeFromLeft(38.f);
-        auto rightInfo = lane.removeFromRight(56.f);
-        auto plot = lane.reduced(3.f, 2.f);
+        // Right info zone
+        auto rightInfo = lane.removeFromRight(52.f);
+        auto plot = lane.reduced(3.f, 1.5f);
 
+        // Waveform path
         juce::Path p;
+        juce::Path fillP;
         for (int i = 0; i < historySize; ++i)
         {
             float x = juce::jmap(float(i), 0.0f, float(historySize - 1), plot.getX(), plot.getRight());
             float y = juce::jmap(history[ch][i], 0.0f, 1.0f, plot.getBottom(), plot.getY());
-            if (i == 0) p.startNewSubPath(x, y);
-            else        p.lineTo(x, y);
+            if (i == 0) { p.startNewSubPath(x, y); fillP.startNewSubPath(x, plot.getBottom()); fillP.lineTo(x, y); }
+            else        { p.lineTo(x, y); fillP.lineTo(x, y); }
         }
+        fillP.lineTo(plot.getRight(), plot.getBottom());
+        fillP.closeSubPath();
 
-        const bool active = latest[ch] > 0.02f;
-        const auto c = cols[ch];
-        g.setColour(c.withAlpha(active ? 0.85f : 0.35f));
-        g.strokePath(p, juce::PathStrokeType(active ? 1.8f : 1.1f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+        // Fill under waveform
+        g.setColour(c.withAlpha(active ? 0.10f : 0.04f));
+        g.fillPath(fillP);
 
-        g.setColour(c.withAlpha(active ? 0.95f : 0.45f));
-        g.setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(10.f), juce::Font::bold)));
+        // Waveform stroke
+        g.setColour(c.withAlpha(active ? 0.88f : 0.28f));
+        g.strokePath(p, juce::PathStrokeType(active ? 1.6f : 1.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
+
+        // Channel label
+        g.setColour(c.withAlpha(active ? 0.95f : 0.40f));
+        g.setFont(juce::Font(juce::FontOptions("Consolas", 10.f, juce::Font::bold)));
         g.drawText(labels[ch], leftLabel.toNearestInt(), juce::Justification::centred);
 
-        g.setColour(active ? juce::Colours::white.withAlpha(0.85f) : COL_MUT.brighter(0.2f));
-        g.setFont(juce::Font(juce::FontOptions("Segoe UI", fs(9.f), juce::Font::plain)));
+        // Status badge
+        if (active)
+        {
+            g.setColour(c.withAlpha(0.15f));
+            g.fillRoundedRectangle(rightInfo.reduced(4.f, 2.f), 3.f);
+            g.setColour(c.withAlpha(0.80f));
+        }
+        else
+            g.setColour(COL_MUT.withAlpha(0.40f));
+        g.setFont(juce::Font(juce::FontOptions("Consolas", 8.5f, juce::Font::bold)));
         g.drawText(active ? "ACTIVE" : "IDLE", rightInfo.toNearestInt(), juce::Justification::centred);
     }
 }
@@ -831,12 +1224,14 @@ void ChannelScopeDisplay::paint(juce::Graphics& g)
 void ParamsContent::setCards(const juce::Rectangle<int>& front,
                              const juce::Rectangle<int>& lfe,
                              const juce::Rectangle<int>& surround,
-                             const juce::Rectangle<int>& space)
+                             const juce::Rectangle<int>& space,
+                             const juce::Rectangle<int>& calib)
 {
     frontCard = front;
     lfeCard = lfe;
     surroundCard = surround;
     spaceCard = space;
+    calibCard = calib;
     repaint();
 }
 
@@ -849,24 +1244,53 @@ void ParamsContent::paint(juce::Graphics& g)
             return;
 
         auto b = card.toFloat();
-        g.setColour(COL_BG1.withAlpha(0.90f));
-        g.fillRoundedRectangle(b, 10.0f);
 
-        g.setColour(COL_BRDR.withAlpha(0.62f));
-        g.drawRoundedRectangle(b, 10.0f, 1.0f);
+        // Drop shadow
+        g.setColour(juce::Colours::black.withAlpha(0.28f));
+        g.fillRoundedRectangle(b.translated(0.0f, 2.5f).expanded(0.5f), 11.0f);
 
-        auto titleBand = b.removeFromTop(22.0f);
-        g.setColour(accent.withAlpha(0.07f));
-        g.fillRoundedRectangle(titleBand, 9.0f);
-        g.setColour(accent.withAlpha(0.26f));
-        g.drawLine(titleBand.getX() + 12.0f, titleBand.getBottom() - 0.5f,
-                   titleBand.getRight() - 12.0f, titleBand.getBottom() - 0.5f, 1.0f);
+        // Card fill gradient
+        juce::ColourGradient bg(
+            COL_CARD.withAlpha(0.94f), b.getX(), b.getY(),
+            COL_BG0.withAlpha(0.96f),  b.getX(), b.getBottom(), false);
+        g.setGradientFill(bg);
+        g.fillRoundedRectangle(b, 11.0f);
+
+        // Accent left-edge bar
+        auto leftBar = b.withWidth(3.0f).reduced(0.0f, 14.0f);
+        g.setColour(accent.withAlpha(0.70f));
+        g.fillRoundedRectangle(leftBar, 1.5f);
+
+        // Top sheen
+        auto sheen = b.reduced(1.5f).withHeight(b.getHeight() * 0.42f);
+        juce::ColourGradient sheenGrad(
+            juce::Colours::white.withAlpha(0.048f), sheen.getX(), sheen.getY(),
+            juce::Colours::transparentBlack,         sheen.getX(), sheen.getBottom(), false);
+        g.setGradientFill(sheenGrad);
+        g.fillRoundedRectangle(sheen, 10.0f);
+
+        // Outer border
+        g.setColour(COL_BRDR.withAlpha(0.65f));
+        g.drawRoundedRectangle(b, 11.0f, 1.0f);
+        // Inner accent border (subtle)
+        g.setColour(accent.withAlpha(0.16f));
+        g.drawRoundedRectangle(b.reduced(1.0f), 10.0f, 0.8f);
+
+        // Title band at top with faint accent tint
+        auto titleBand = b.withHeight(24.0f);
+        g.setColour(accent.withAlpha(0.12f));
+        g.fillRoundedRectangle(titleBand, 10.0f);
+        // Separator line under title
+        g.setColour(accent.withAlpha(0.28f));
+        g.drawLine(titleBand.getX() + 10.0f, titleBand.getBottom(),
+                   titleBand.getRight() - 10.0f, titleBand.getBottom(), 0.8f);
     };
 
     drawCard(frontCard,    COL_ACC);
     drawCard(lfeCard,      COL_YLW);
     drawCard(surroundCard, COL_ORG);
     drawCard(spaceCard,    COL_PRP);
+    drawCard(calibCard,    juce::Colour(0xff66d0ff));
 }
 
 //==============================================================================
@@ -881,43 +1305,74 @@ MainComponent::MainComponent()
 
     auto styleButton = [](juce::TextButton& b, juce::Colour base, bool emphasize = false)
     {
-        b.setColour(juce::TextButton::buttonColourId, base.withAlpha(emphasize ? 0.40f : 0.28f));
-        b.setColour(juce::TextButton::buttonOnColourId, base.withAlpha(0.52f));
-        b.setColour(juce::TextButton::textColourOffId, juce::Colours::white.withAlpha(0.92f));
-        b.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        // Dark, cohesive button palette with subtle accent tint.
+        b.setColour(juce::TextButton::buttonColourId,   base.withAlpha(emphasize ? 0.82f : 0.69f));
+        b.setColour(juce::TextButton::buttonOnColourId, base.brighter(0.12f).withAlpha(0.86f));
+        b.setColour(juce::TextButton::textColourOffId,  COL_TXT.withAlpha(0.95f));
+        b.setColour(juce::TextButton::textColourOnId,   COL_TXT);
     };
 
-    fileBtn.setButtonText("Open Audio File");
-    exportBtn.setButtonText("Export 5.1 WAV");
-    settingsBtn.setButtonText("Audio Settings");
+    auto themedButton = [](juce::Colour accent, float accentAmount = 0.22f)
+    {
+        const auto base = COL_CARD.interpolatedWith(COL_BG2, 0.48f);
+        return base.interpolatedWith(accent, juce::jlimit(0.0f, 0.42f, accentAmount));
+    };
 
-    fileLabel.setColour(juce::Label::textColourId, COL_TXT);
-    fileLabel.setColour(juce::Label::backgroundColourId, COL_BG0.withAlpha(0.72f));
-    fileLabel.setColour(juce::Label::outlineColourId, COL_BRDR.withAlpha(0.82f));
-    fileLabel.setText("No file loaded", juce::dontSendNotification);
-    fileLabel.setBorderSize({ 3, 10, 3, 10 });
+    // Custom LookAndFeel override for text buttons to get border/rounded style
+    struct ButtonLAF : public juce::LookAndFeel_V4
+    {
+        // Thin-bordered, lightly glossy buttons.
+        void drawButtonBackground(juce::Graphics& g, juce::Button& b, const juce::Colour& bg,
+                                  bool hover, bool down) override
+        {
+            auto bounds = b.getLocalBounds().toFloat().reduced(0.5f);
+            auto baseCol = bg;
+            if (hover) baseCol = baseCol.brighter(0.08f);
+            if (down)  baseCol = baseCol.brighter(0.16f);
+
+            juce::ColourGradient grad(baseCol.brighter(0.06f), bounds.getX(), bounds.getY(),
+                                      baseCol.darker(0.05f).withAlpha(baseCol.getAlpha() * 0.82f), bounds.getX(), bounds.getBottom(), false);
+            g.setGradientFill(grad);
+            g.fillRoundedRectangle(bounds, 6.0f);
+
+            // Thin border
+            g.setColour(baseCol.brighter(0.26f).withAlpha(0.48f));
+            g.drawRoundedRectangle(bounds, 6.0f, 0.9f);
+        }
+    };
+
+    fileBtn.setButtonText("  Open File");
+    exportBtn.setButtonText("  Export 5.1 WAV");
+    batchExportBtn.setButtonText("  Batch Export");
+    settingsBtn.setButtonText("  Audio Settings");
+
+    fileLabel.setColour(juce::Label::textColourId, COL_TXT.withAlpha(0.72f));
+    fileLabel.setColour(juce::Label::backgroundColourId, COL_BG2.withAlpha(0.70f));
+    fileLabel.setColour(juce::Label::outlineColourId, COL_BRDR.withAlpha(0.65f));
+    fileLabel.setText("  No file loaded", juce::dontSendNotification);
+    fileLabel.setBorderSize({ 3, 8, 3, 8 });
     fileLabel.setJustificationType(juce::Justification::centredLeft);
-    fileLabel.setFont(juce::Font(juce::FontOptions("Segoe UI", fs(12.f), juce::Font::plain)));
+    fileLabel.setFont(juce::Font(juce::FontOptions("Consolas", 11.5f, juce::Font::plain)));
 
-    statusLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.94f));
-    statusLabel.setColour(juce::Label::backgroundColourId, COL_BG0.withAlpha(0.65f));
-    statusLabel.setColour(juce::Label::outlineColourId, COL_BRDR.withAlpha(0.72f));
+    statusLabel.setColour(juce::Label::textColourId, COL_MUT.brighter(0.45f));
+    statusLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+    statusLabel.setColour(juce::Label::outlineColourId, juce::Colours::transparentBlack);
     statusLabel.setBorderSize({ 2, 10, 2, 10 });
     statusLabel.setJustificationType(juce::Justification::centredLeft);
-    statusLabel.setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(11.f), juce::Font::bold)));
+    statusLabel.setFont(juce::Font(juce::FontOptions("Consolas", 11.f, juce::Font::plain)));
 
-    channelImpactLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.88f));
-    channelImpactLabel.setColour(juce::Label::backgroundColourId, COL_BG0.withAlpha(0.58f));
-    channelImpactLabel.setColour(juce::Label::outlineColourId, COL_BRDR.withAlpha(0.6f));
-    channelImpactLabel.setBorderSize({ 2, 10, 2, 10 });
+    channelImpactLabel.setColour(juce::Label::textColourId, COL_ACC.withAlpha(0.80f));
+    channelImpactLabel.setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
+    channelImpactLabel.setColour(juce::Label::outlineColourId, juce::Colours::transparentBlack);
+    channelImpactLabel.setBorderSize({ 2, 4, 2, 4 });
     channelImpactLabel.setJustificationType(juce::Justification::centredLeft);
-    channelImpactLabel.setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(10.f), juce::Font::bold)));
-    channelImpactLabel.setText("Effect chain: Master > Front L/R > Front C > LFE > Surround L/R", juce::dontSendNotification);
+    channelImpactLabel.setFont(juce::Font(juce::FontOptions("Consolas", 10.5f, juce::Font::plain)));
+    channelImpactLabel.setText("Effect Chain:  Master > Front L/R > Front C > LFE > Surround L/R", juce::dontSendNotification);
 
     timelineSlider.setSliderStyle(juce::Slider::LinearHorizontal);
     timelineSlider.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
     timelineSlider.setRange(0.0, 1.0, 0.001);
-    timelineSlider.setColour(juce::Slider::trackColourId, COL_ACC.withAlpha(0.75f));
+    timelineSlider.setColour(juce::Slider::trackColourId, COL_ACC.withAlpha(0.80f));
     timelineSlider.setColour(juce::Slider::thumbColourId, juce::Colours::white.withAlpha(0.95f));
     timelineSlider.getProperties().set("accent", COL_ACC.toString());
     timelineSlider.onDragStart = [this] { timelineBeingDragged = true; };
@@ -927,6 +1382,7 @@ MainComponent::MainComponent()
         if (fileLoaded)
             transport.setPosition(timelineSlider.getValue());
         updateTimelineFromTransport();
+        saveSessionState();
     };
     timelineSlider.onValueChange = [this]
     {
@@ -934,31 +1390,62 @@ MainComponent::MainComponent()
             transport.setPosition(timelineSlider.getValue());
     };
 
-    timelineLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.9f));
+    timelineLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.85f));
     timelineLabel.setJustificationType(juce::Justification::centredRight);
-    timelineLabel.setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(11.f), juce::Font::bold)));
+    timelineLabel.setFont(juce::Font(juce::FontOptions("Consolas", 12.f, juce::Font::bold)));
     timelineLabel.setText("00:00 / 00:00", juce::dontSendNotification);
 
     presetLabel.setText("Scene Presets", juce::dontSendNotification);
-    presetLabel.setColour(juce::Label::textColourId, juce::Colours::white.withAlpha(0.96f));
-    presetLabel.setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(12.f), juce::Font::bold)));
+    presetLabel.setColour(juce::Label::textColourId, COL_MUT.brighter(0.55f));
+    presetLabel.setFont(juce::Font(juce::FontOptions("Consolas", 11.f, juce::Font::bold)));
 
-    styleButton(fileBtn, COL_ACC);
-    styleButton(exportBtn, COL_YLW);
-    styleButton(settingsBtn, COL_GRN);
-    styleButton(playBtn, COL_GRN, true);
-    styleButton(stopBtn, COL_ORG);
-    styleButton(presetCinema, juce::Colour(0xfff0a000));
-    styleButton(presetMusic, juce::Colour(0xff3da7ff));
-    styleButton(presetVocal, juce::Colour(0xff55d19a));
-    styleButton(presetReset, COL_MUT);
+    snapshotLabel.setText("A/B Snapshots: empty", juce::dontSendNotification);
+    snapshotLabel.setColour(juce::Label::textColourId, COL_MUT.brighter(0.42f));
+    snapshotLabel.setFont(juce::Font(juce::FontOptions("Consolas", 10.5f, juce::Font::plain)));
+
+    meterStatsLabel.setText("Peak: -120.0 dBFS  |  LUFS approx: -70.0  |  Clips: 0", juce::dontSendNotification);
+    meterStatsLabel.setColour(juce::Label::textColourId, COL_MUT.brighter(0.42f));
+    meterStatsLabel.setFont(juce::Font(juce::FontOptions("Consolas", 10.5f, juce::Font::plain)));
+    meterStatsLabel.setJustificationType(juce::Justification::centredLeft);
+
+    channelControlLabel.setText("Channel Controls (click: Normal -> Mute -> Solo):", juce::dontSendNotification);
+    channelControlLabel.setColour(juce::Label::textColourId, COL_MUT.brighter(0.42f));
+    channelControlLabel.setFont(juce::Font(juce::FontOptions("Consolas", 10.5f, juce::Font::bold)));
+
+    styleButton(fileBtn,      themedButton(COL_ACC, 0.20f));
+    styleButton(exportBtn,    themedButton(COL_YLW, 0.24f));
+    styleButton(batchExportBtn, themedButton(COL_PRP, 0.22f));
+    styleButton(settingsBtn,  themedButton(COL_GRN, 0.22f));
+    styleButton(playBtn,      themedButton(COL_GRN, 0.30f), true);
+    styleButton(stopBtn,      themedButton(COL_ORG, 0.26f));
+    styleButton(presetCinema, themedButton(COL_ORG, 0.26f));
+    styleButton(presetMusic,  themedButton(COL_ACC, 0.25f));
+    styleButton(presetVocal,  themedButton(COL_GRN, 0.25f));
+    styleButton(presetReset,  themedButton(COL_PRP, 0.18f));
+    styleButton(presetSave,   themedButton(COL_PRP, 0.24f));
+    styleButton(presetLoad,   themedButton(COL_ACC, 0.24f));
+    styleButton(snapshotStoreA, themedButton(COL_YLW, 0.23f));
+    styleButton(snapshotStoreB, themedButton(COL_ORG, 0.23f));
+    styleButton(snapshotRecallA, themedButton(COL_ACC, 0.23f));
+    styleButton(snapshotRecallB, themedButton(COL_PRP, 0.23f));
+    styleButton(resetMeterStatsBtn, themedButton(COL_PRP, 0.17f));
+
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        soloAtomic[(size_t)ch].store(0, std::memory_order_relaxed);
+        muteAtomic[(size_t)ch].store(0, std::memory_order_relaxed);
+        styleButton(soloBtns[(size_t)ch], themedButton(getChannelUiColour(ch), 0.22f));
+    }
 
     addAndMakeVisible(fileBtn);
     addAndMakeVisible(exportBtn);
+    addAndMakeVisible(batchExportBtn);
     addAndMakeVisible(settingsBtn);
     addAndMakeVisible(fileLabel);
     addAndMakeVisible(statusLabel);
     addAndMakeVisible(channelImpactLabel);
+    addAndMakeVisible(snapshotLabel);
+    addAndMakeVisible(channelControlLabel);
     addAndMakeVisible(timelineSlider);
     addAndMakeVisible(timelineLabel);
     addAndMakeVisible(playBtn);
@@ -968,6 +1455,17 @@ MainComponent::MainComponent()
     addAndMakeVisible(presetMusic);
     addAndMakeVisible(presetVocal);
     addAndMakeVisible(presetReset);
+    addAndMakeVisible(presetSave);
+    addAndMakeVisible(presetLoad);
+    addAndMakeVisible(snapshotStoreA);
+    addAndMakeVisible(snapshotStoreB);
+    addAndMakeVisible(snapshotRecallA);
+    addAndMakeVisible(snapshotRecallB);
+    addAndMakeVisible(meterStatsLabel);
+    addAndMakeVisible(resetMeterStatsBtn);
+
+    for (int ch = 0; ch < 6; ++ch)
+        addAndMakeVisible(soloBtns[(size_t)ch]);
     addAndMakeVisible(spectrum);
     addAndMakeVisible(channelScope);
     addAndMakeVisible(paramsViewport);
@@ -978,6 +1476,7 @@ MainComponent::MainComponent()
 
     fileBtn.onClick      = [this] { openFile(); };
     exportBtn.onClick    = [this] { exportCurrentTrackTo51Wav(); };
+    batchExportBtn.onClick = [this] { exportBatchTo51Wav(); };
     settingsBtn.onClick  = [this] { openAudioSettings(); };
     playBtn.onClick      = [this] {
         if (!fileLoaded)
@@ -988,11 +1487,76 @@ MainComponent::MainComponent()
         transport.start();
         setPlayState(true);
     };
-    stopBtn.onClick      = [this] { transport.stop(); transport.setPosition(0.0); setPlayState(false); };
+    stopBtn.onClick      = [this] { transport.stop(); transport.setPosition(0.0); setPlayState(false); saveSessionState(); };
     presetCinema.onClick = [this] { applyPresetCinema(); };
     presetMusic.onClick  = [this] { applyPresetMusicWide(); };
     presetVocal.onClick  = [this] { applyPresetVocalFocus(); };
     presetReset.onClick  = [this] { resetToDefaultPreset(); };
+    snapshotStoreA.onClick = [this] { storeSnapshot(true); };
+    snapshotStoreB.onClick = [this] { storeSnapshot(false); };
+    snapshotRecallA.onClick = [this] { recallSnapshot(true); };
+    snapshotRecallB.onClick = [this] { recallSnapshot(false); };
+    resetMeterStatsBtn.onClick = [this] { resetProMeters(); };
+    presetSave.onClick   = [this]
+    {
+        presetChooser = std::make_unique<juce::FileChooser>(
+            "Save current upmix preset",
+            getDefaultPresetFile(),
+            "*.json");
+
+        presetChooser->launchAsync(juce::FileBrowserComponent::saveMode
+                                    | juce::FileBrowserComponent::canSelectFiles
+                                    | juce::FileBrowserComponent::warnAboutOverwriting,
+            [this](const juce::FileChooser& chooser)
+            {
+                auto target = chooser.getResult();
+                if (target == juce::File{})
+                    return;
+
+                if (!target.hasFileExtension("json"))
+                    target = target.withFileExtension(".json");
+
+                if (savePresetToFile(target))
+                    channelImpactLabel.setText("Preset saved: " + target.getFileName(), juce::dontSendNotification);
+                else
+                    channelImpactLabel.setText("Preset save failed.", juce::dontSendNotification);
+            });
+    };
+    presetLoad.onClick   = [this]
+    {
+        presetChooser = std::make_unique<juce::FileChooser>(
+            "Load upmix preset",
+            getStateDirectory(),
+            "*.json");
+
+        presetChooser->launchAsync(juce::FileBrowserComponent::openMode
+                                    | juce::FileBrowserComponent::canSelectFiles,
+            [this](const juce::FileChooser& chooser)
+            {
+                auto target = chooser.getResult();
+                if (target == juce::File{})
+                    return;
+
+                if (loadPresetFromFile(target))
+                    channelImpactLabel.setText("Preset loaded: " + target.getFileName(), juce::dontSendNotification);
+                else
+                    channelImpactLabel.setText("Preset load failed.", juce::dontSendNotification);
+            });
+    };
+
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        auto& soloBtn = soloBtns[(size_t)ch];
+        soloBtn.setClickingTogglesState(false);
+        soloBtn.onClick = [this, ch]
+        {
+            int mode = getChannelControlMode(ch);
+            mode = (mode + 1) % 3;
+            setChannelControlMode(ch, mode, true);
+            flashChannelFocus({ ch }, juce::String(channelShortNames[(size_t)ch]) + " " + (mode == 2 ? "Solo" : (mode == 1 ? "Mute" : "Normal")));
+        };
+        setChannelControlMode(ch, 0, false);
+    }
 
     btnStereo.setRadioGroupId(1);
     btn51.setRadioGroupId(1);
@@ -1008,21 +1572,28 @@ MainComponent::MainComponent()
     masterVol.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
     masterVol.getProperties().set("accent", COL_ACC.toString());
     masterVolLabel.setText("Master Level", juce::dontSendNotification);
-    masterVolLabel.setColour(juce::Label::textColourId, COL_MUT.brighter(0.65f));
-    masterVolLabel.setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(11.f), juce::Font::bold)));
+    masterVolLabel.setColour(juce::Label::textColourId, COL_MUT.brighter(0.45f));
+    masterVolLabel.setFont(juce::Font(juce::FontOptions("Consolas", 11.f, juce::Font::plain)));
+    limiterLabel.setText("Limiter: 0.0 dB", juce::dontSendNotification);
+    limiterLabel.setColour(juce::Label::textColourId, COL_GRN.withAlpha(0.90f));
+    limiterLabel.setJustificationType(juce::Justification::centredRight);
+    limiterLabel.setFont(juce::Font(juce::FontOptions("Consolas", 11.f, juce::Font::bold)));
     masterVol.onValueChange = [this] {
+        masterGainAtomic.store(float(masterVol.getValue()), std::memory_order_relaxed);
         flashChannelFocus({0, 1, 2, 3, 4, 5}, "Master Level");
     };
+    masterVol.onDragEnd = [this] { saveSessionState(); };
     addAndMakeVisible(masterVol);
     addAndMakeVisible(masterVolLabel);
+    addAndMakeVisible(limiterLabel);
 
     addAndMakeVisible(mFL); addAndMakeVisible(mFR);
     addAndMakeVisible(mFC); addAndMakeVisible(mLFE);
     addAndMakeVisible(mSL); addAndMakeVisible(mSR);
 
-    for (auto* l : {&lblFront, &lblLFE, &lblSurround, &lblSpace})
+    for (auto* l : {&lblFront, &lblLFE, &lblSurround, &lblSpace, &lblCalib})
     {
-        l->setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(13.5f), juce::Font::bold)));
+        l->setFont(juce::Font(juce::FontOptions("Consolas", 11.5f, juce::Font::bold)));
         l->setMinimumHorizontalScale(0.80f);
         l->setColour(juce::Label::textColourId, COL_MUT.brighter(0.55f));
         l->setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
@@ -1031,14 +1602,16 @@ MainComponent::MainComponent()
         l->setJustificationType(juce::Justification::centredLeft);
         paramsContent.addAndMakeVisible(l);
     }
-    lblFront.setText   ("FRONT STAGE - FL / FR / FC" , juce::dontSendNotification);
+    lblFront.setText   ("FRONT STAGE - FL / FR / FC", juce::dontSendNotification);
     lblLFE.setText     ("SUB BASS - LFE", juce::dontSendNotification);
     lblSurround.setText("SURROUND FIELD - SL / SR", juce::dontSendNotification);
     lblSpace.setText   ("SPACE / DECORRELATION", juce::dontSendNotification);
+    lblCalib.setText   ("SPEAKER CALIBRATION - TRIM / DELAY / POLARITY", juce::dontSendNotification);
     lblFront.setColour   (juce::Label::textColourId, COL_ACC);
     lblLFE.setColour     (juce::Label::textColourId, COL_YLW);
     lblSurround.setColour(juce::Label::textColourId, COL_ORG);
     lblSpace.setColour   (juce::Label::textColourId, COL_PRP);
+    lblCalib.setColour   (juce::Label::textColourId, juce::Colour(0xff8dd6ff));
 
     auto wire = [this](ParamSlider& ps) {
         ps.onChange = [this, &ps](float) {
@@ -1047,6 +1620,7 @@ MainComponent::MainComponent()
             syncParamsFromSliders();
             onSliderEdited(&ps);
         };
+        ps.slider.onDragEnd = [this] { saveSessionState(); };
         paramsContent.addAndMakeVisible(ps);
     };
     for (auto* ps : {&sFrontGain,&sCenterGain,&sCenterHPF,
@@ -1055,13 +1629,71 @@ MainComponent::MainComponent()
                      &sReverbWet,&sRoomSize,&sVelvetDens})
         wire(*ps);
 
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        const auto name = juce::String(channelShortNames[(size_t)ch]);
+
+        calibTrim[(size_t)ch] = std::make_unique<ParamSlider>(
+            name + " Trim",
+            -12.0f, 12.0f, 0.0f, "dB",
+            juce::Colour(0xff66d0ff));
+        calibTrim[(size_t)ch]->onChange = [this, ch](float v)
+        {
+            calibTrimGainAtomic[(size_t)ch].store(juce::Decibels::decibelsToGain(v), std::memory_order_relaxed);
+            flashChannelFocus({ ch }, juce::String(channelShortNames[(size_t)ch]) + " Trim");
+        };
+        calibTrim[(size_t)ch]->slider.onDragEnd = [this] { saveSessionState(); };
+        paramsContent.addAndMakeVisible(*calibTrim[(size_t)ch]);
+
+        calibDelay[(size_t)ch] = std::make_unique<ParamSlider>(
+            name + " Delay",
+            0.0f, 40.0f, 0.0f, "ms",
+            juce::Colour(0xff66d0ff));
+        calibDelay[(size_t)ch]->onChange = [this, ch](float v)
+        {
+            calibDelayMsAtomic[(size_t)ch].store(v, std::memory_order_relaxed);
+            flashChannelFocus({ ch }, juce::String(channelShortNames[(size_t)ch]) + " Delay");
+        };
+        calibDelay[(size_t)ch]->slider.onDragEnd = [this] { saveSessionState(); };
+        paramsContent.addAndMakeVisible(*calibDelay[(size_t)ch]);
+
+        calibPolarity[(size_t)ch] = std::make_unique<juce::ToggleButton>("Invert " + name);
+        calibPolarity[(size_t)ch]->setColour(juce::ToggleButton::textColourId, COL_MUT.brighter(0.6f));
+        calibPolarity[(size_t)ch]->setColour(juce::ToggleButton::tickColourId, juce::Colour(0xff66d0ff));
+        calibPolarity[(size_t)ch]->onClick = [this, ch]
+        {
+            const int state = calibPolarity[(size_t)ch]->getToggleState() ? 1 : 0;
+            calibPolarityAtomic[(size_t)ch].store(state, std::memory_order_relaxed);
+            flashChannelFocus({ ch }, juce::String(channelShortNames[(size_t)ch]) + " Polarity");
+            saveSessionState();
+        };
+        paramsContent.addAndMakeVisible(*calibPolarity[(size_t)ch]);
+
+        calibTrimGainAtomic[(size_t)ch].store(1.0f, std::memory_order_relaxed);
+        calibDelayMsAtomic[(size_t)ch].store(0.0f, std::memory_order_relaxed);
+        calibPolarityAtomic[(size_t)ch].store(0, std::memory_order_relaxed);
+    }
+
     // Audio device setup
     setAudioChannels(0, 2);
     configureOutputForCurrentDevice();
     deviceManager.addChangeListener(this);
 
+    // Prime lock-free parameter slots and gain state from UI defaults.
+    paramSlots[0] = captureParamsFromSliders();
+    paramSlots[1] = paramSlots[0];
+    activeParamSlot.store(0, std::memory_order_release);
+    masterGainAtomic.store(float(masterVol.getValue()), std::memory_order_relaxed);
+
     refreshStatusLabel();
     updateTimelineFromTransport();
+    suppressSessionPersistence = true;
+    loadDefaultPreset();
+    restoreSessionState();
+    suppressSessionPersistence = false;
+    saveSessionState();
+    refreshSnapshotLabel();
+    resetProMeters();
 
     setSize(1120, 860);
     startTimerHz(30);
@@ -1070,6 +1702,8 @@ MainComponent::MainComponent()
 // Cleans up listeners and shuts down audio safely.
 MainComponent::~MainComponent()
 {
+    saveSessionState();
+    saveDefaultPreset();
     deviceManager.removeChangeListener(this);
     shutdownAudio();
     setLookAndFeel(nullptr);
@@ -1080,9 +1714,22 @@ void MainComponent::prepareToPlay(int blockSize, double sampleRate)
 {
     currentSampleRate = sampleRate;
     transport.prepareToPlay(blockSize, sampleRate);
-    engine.prepare(sampleRate, blockSize);
     sixChBuf.setSize(6, blockSize, false, true);
-    syncParamsFromSliders();
+    stereoInBuf.setSize(2, blockSize, false, true);
+    engine.prepare(sampleRate, blockSize);
+
+    const int activeSlot = juce::jlimit(0, 1, activeParamSlot.load(std::memory_order_acquire));
+    engine.params = paramSlots[(size_t)activeSlot];
+
+    limiterGainState = 1.0f;
+    limiterReleaseCoeff = std::exp(-1.0f / float(juce::jmax(1.0, sampleRate * 0.18)));
+    limiterReductionDbAtomic.store(0.0f, std::memory_order_relaxed);
+    limiterHoldBlocksAtomic.store(0, std::memory_order_relaxed);
+
+    speakerDelayCapacity = juce::jmax(8, int(sampleRate * 0.200) + blockSize + 8);
+    speakerDelayBuffer.setSize(6, speakerDelayCapacity, false, true, true);
+    speakerDelayBuffer.clear();
+    speakerDelayWritePos = 0;
 }
 
 // Called by JUCE when playback is stopping or audio device is being released.
@@ -1090,6 +1737,9 @@ void MainComponent::releaseResources()
 {
     transport.releaseResources();
     engine.reset();
+    speakerDelayBuffer.clear();
+    speakerDelayWritePos = 0;
+    speakerDelayCapacity = 0;
 }
 
 // Real-time audio callback: reads stereo file data, upmixes to 5.1, and writes to hardware output.
@@ -1100,38 +1750,61 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& info)
     if (!fileLoaded || !transport.isPlaying())
     {
         std::fill(std::begin(meterRms), std::end(meterRms), 0.0f);
+        limiterReductionDbAtomic.store(0.0f, std::memory_order_relaxed);
+        limiterHoldBlocksAtomic.store(0, std::memory_order_relaxed);
         return;
     }
 
-    // Get stereo from transport into a temp buffer
-    int numSamples = info.numSamples;
-    juce::AudioBuffer<float> stereoTmp(2, numSamples);
-    stereoTmp.clear();
-    juce::AudioSourceChannelInfo stereoInfo(&stereoTmp, 0, numSamples);
+    const int numSamples = info.numSamples;
+    if (numSamples <= 0
+        || numSamples > stereoInBuf.getNumSamples()
+        || numSamples > sixChBuf.getNumSamples())
+    {
+        jassertfalse;
+        std::fill(std::begin(meterRms), std::end(meterRms), 0.0f);
+        return;
+    }
+
+    // Pull stereo source into reusable callback buffer.
+    stereoInBuf.clear(0, numSamples);
+    juce::AudioSourceChannelInfo stereoInfo(&stereoInBuf, 0, numSamples);
     transport.getNextAudioBlock(stereoInfo);
 
-    // Process into 6-channel output
-    sixChBuf.setSize(6, numSamples, false, false, true);
-    engine.process(stereoTmp, sixChBuf, numSamples, surround51Active);
+    // Atomically switch to the latest UI parameters.
+    const int activeSlot = juce::jlimit(0, 1, activeParamSlot.load(std::memory_order_acquire));
+    engine.params = paramSlots[(size_t)activeSlot];
 
-    // Apply master volume and write to hardware output buffer
-    float vol = float(masterVol.getValue());
-    for (int ch = 0; ch < std::min(6, info.buffer->getNumChannels()); ch++)
+    // Process into 6-channel output.
+    sixChBuf.clear(0, numSamples);
+    engine.process(stereoInBuf, sixChBuf, numSamples, surround51Active);
+
+    const float master = masterGainAtomic.load(std::memory_order_relaxed);
+    if (master != 1.0f)
+        sixChBuf.applyGain(0, numSamples, master);
+
+    applySpeakerCalibration(sixChBuf, numSamples);
+    applyChannelMasking(sixChBuf, numSamples);
+
+    float reductionDb = 0.0f;
+    int limiterHold = limiterHoldBlocksAtomic.load(std::memory_order_relaxed);
+    applySafetyLimiter(sixChBuf, 6, numSamples, limiterThreshold, limiterReleaseCoeff,
+                       limiterGainState, reductionDb, limiterHold);
+    limiterReductionDbAtomic.store(reductionDb, std::memory_order_relaxed);
+    limiterHoldBlocksAtomic.store(limiterHold, std::memory_order_relaxed);
+
+    // Write to the currently active hardware outputs.
+    const int outputsToWrite = juce::jmin(6, info.buffer->getNumChannels());
+    for (int ch = 0; ch < outputsToWrite; ++ch)
     {
         float* dest = info.buffer->getWritePointer(ch, info.startSample);
         const float* src = sixChBuf.getReadPointer(ch);
-        juce::FloatVectorOperations::copyWithMultiply(dest, src, vol, numSamples);
+        juce::FloatVectorOperations::copy(dest, src, numSamples);
     }
 
-    // Feed meters & spectrum (from the output buffer)
-    for (int ch = 0; ch < 6; ch++)
-    {
-        const float* data = sixChBuf.getReadPointer(ch);
-        float rms = 0.f;
-        for (int i = 0; i < numSamples; i++) rms += data[i]*data[i];
-        meterRms[ch] = std::sqrt(rms / numSamples);
-    }
-    // Spectrum from FL
+    // Feed meters and statistics from the processed 6-channel bus.
+    updateMeterStats(sixChBuf, numSamples);
+
+    // Spectrum follows FL channel.
     spectrum.pushBuffer(sixChBuf.getReadPointer(0), numSamples);
 }
 
@@ -1148,6 +1821,24 @@ void MainComponent::timerCallback()
     channelScope.pushLevels(meterRms);
     spectrum.setSurroundMode(surround51Active);
     updateTimelineFromTransport();
+
+    const float limiterReduction = limiterReductionDbAtomic.load(std::memory_order_relaxed);
+    const int limiterClipHold = limiterHoldBlocksAtomic.load(std::memory_order_relaxed);
+    if (limiterClipHold > 0)
+        limiterLabel.setColour(juce::Label::textColourId, juce::Colour(0xffff6b6b));
+    else if (limiterReduction > 0.10f)
+        limiterLabel.setColour(juce::Label::textColourId, juce::Colour(0xffffc85a));
+    else
+        limiterLabel.setColour(juce::Label::textColourId, COL_GRN.withAlpha(0.90f));
+
+    limiterLabel.setText("Limiter: -" + juce::String(limiterReduction, 1) + " dB",
+                         juce::dontSendNotification);
+
+    meterStatsLabel.setText(
+        "Peak: " + juce::String(peakDbAtomic.load(std::memory_order_relaxed), 1) + " dBFS"
+        + "  |  LUFS approx: " + juce::String(lufsApproxAtomic.load(std::memory_order_relaxed), 1)
+        + "  |  Clips: " + juce::String(clipEventsAtomic.load(std::memory_order_relaxed)),
+        juce::dontSendNotification);
 
     for (int ch = 0; ch < 6; ++ch)
         channelFocus[ch] = std::max(0.0f, channelFocus[ch] - 0.05f);
@@ -1175,8 +1866,8 @@ void MainComponent::timerCallback()
 // Handles Stereo/5.1 mode toggle buttons.
 void MainComponent::buttonClicked(juce::Button* b)
 {
-    if (b == &btnStereo) { surround51Active = false; engine.reset(); flashChannelFocus({0, 1}, "Stereo Mode"); }
-    if (b == &btn51)     { surround51Active = true;  engine.reset(); flashChannelFocus({0, 1, 2, 3, 4, 5}, "5.1 Mode"); }
+    if (b == &btnStereo) { surround51Active = false; engine.reset(); flashChannelFocus({0, 1}, "Stereo Mode"); saveSessionState(); }
+    if (b == &btn51)     { surround51Active = true;  engine.reset(); flashChannelFocus({0, 1, 2, 3, 4, 5}, "5.1 Mode"); saveSessionState(); }
     refreshStatusLabel();
 }
 
@@ -1193,21 +1884,275 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
 // Pulls all UI slider values into the DSP parameter model.
 void MainComponent::syncParamsFromSliders()
 {
-    engine.params.frontGain     = float(sFrontGain .slider.getValue());
-    engine.params.centerGain    = float(sCenterGain.slider.getValue());
-    engine.params.centerHPF     = float(sCenterHPF .slider.getValue());
-    engine.params.lfeGain       = float(sLFEGain   .slider.getValue());
-    engine.params.lfeCrossover  = float(sLFEHz     .slider.getValue());
-    engine.params.lfeShelfGain  = float(sLFEShelf  .slider.getValue());
-    engine.params.exciterDrive  = float(sExciter   .slider.getValue());
-    engine.params.surroundGain  = float(sSurrGain  .slider.getValue());
-    engine.params.haasDelayMs   = float(sHaasMs    .slider.getValue());
-    engine.params.surroundHPF   = float(sSurrHPF   .slider.getValue());
-    engine.params.sideBlend     = float(sSideBlend .slider.getValue());
-    engine.params.midBlend      = float(sMidBlend  .slider.getValue());
-    engine.params.reverbWet     = float(sReverbWet .slider.getValue());
-    engine.params.roomSize      = float(sRoomSize  .slider.getValue());
-    engine.params.velvetDensity = float(sVelvetDens.slider.getValue());
+    publishParamsToAudioThread();
+}
+
+// Captures the current UI slider state into a single parameter bundle.
+UpmixParams MainComponent::captureParamsFromSliders() const
+{
+    UpmixParams p;
+    p.frontGain     = float(sFrontGain.slider.getValue());
+    p.centerGain    = float(sCenterGain.slider.getValue());
+    p.centerHPF     = float(sCenterHPF.slider.getValue());
+    p.lfeGain       = float(sLFEGain.slider.getValue());
+    p.lfeCrossover  = float(sLFEHz.slider.getValue());
+    p.lfeShelfGain  = float(sLFEShelf.slider.getValue());
+    p.exciterDrive  = float(sExciter.slider.getValue());
+    p.surroundGain  = float(sSurrGain.slider.getValue());
+    p.haasDelayMs   = float(sHaasMs.slider.getValue());
+    p.surroundHPF   = float(sSurrHPF.slider.getValue());
+    p.sideBlend     = float(sSideBlend.slider.getValue());
+    p.midBlend      = float(sMidBlend.slider.getValue());
+    p.reverbWet     = float(sReverbWet.slider.getValue());
+    p.roomSize      = float(sRoomSize.slider.getValue());
+    p.velvetDensity = float(sVelvetDens.slider.getValue());
+    return p;
+}
+
+// Publishes new UI parameters to the audio thread via lock-free double buffering.
+void MainComponent::publishParamsToAudioThread()
+{
+    const UpmixParams latest = captureParamsFromSliders();
+
+    const int current = juce::jlimit(0, 1, activeParamSlot.load(std::memory_order_relaxed));
+    const int inactive = 1 - current;
+    paramSlots[(size_t)inactive] = latest;
+    activeParamSlot.store(inactive, std::memory_order_release);
+}
+
+// Returns compact channel-control mode: 0=normal, 1=mute, 2=solo.
+int MainComponent::getChannelControlMode(int ch) const
+{
+    if (!juce::isPositiveAndBelow(ch, 6))
+        return 0;
+
+    const bool solo = soloAtomic[(size_t)ch].load(std::memory_order_relaxed) != 0;
+    const bool mute = muteAtomic[(size_t)ch].load(std::memory_order_relaxed) != 0;
+    if (solo) return 2;
+    if (mute) return 1;
+    return 0;
+}
+
+// Refreshes one channel-control button text and style.
+void MainComponent::refreshChannelControlButton(int ch)
+{
+    if (!juce::isPositiveAndBelow(ch, 6))
+        return;
+
+    const int mode = getChannelControlMode(ch);
+    auto& btn = soloBtns[(size_t)ch];
+    const juce::String base = channelShortNames[(size_t)ch];
+    const auto channelCol = getChannelUiColour(ch);
+    const auto darkBase = COL_CARD.interpolatedWith(COL_BG2, 0.48f);
+
+    auto applyChannelButtonColour = [&](juce::Colour fill)
+    {
+        btn.setColour(juce::TextButton::buttonColourId, fill);
+        btn.setColour(juce::TextButton::textColourOffId, COL_TXT.withAlpha(0.95f));
+        btn.setColour(juce::TextButton::textColourOnId, COL_TXT);
+    };
+
+    if (mode == 2)
+    {
+        btn.setButtonText(base + " SOLO");
+        applyChannelButtonColour(darkBase.interpolatedWith(channelCol, 0.34f).withAlpha(0.86f));
+    }
+    else if (mode == 1)
+    {
+        btn.setButtonText(base + " MUTE");
+        const auto muteColour = darkBase
+            .interpolatedWith(juce::Colour(0xffcc5a6f), 0.20f)
+            .interpolatedWith(channelCol, 0.16f);
+        applyChannelButtonColour(muteColour.withAlpha(0.82f));
+    }
+    else
+    {
+        btn.setButtonText(base);
+        applyChannelButtonColour(darkBase.interpolatedWith(channelCol, 0.18f).withAlpha(0.79f));
+    }
+}
+
+// Applies mode to one channel-control button and corresponding audio-thread atomics.
+void MainComponent::setChannelControlMode(int ch, int mode, bool shouldSave)
+{
+    if (!juce::isPositiveAndBelow(ch, 6))
+        return;
+
+    mode = juce::jlimit(0, 2, mode);
+    soloAtomic[(size_t)ch].store(mode == 2 ? 1 : 0, std::memory_order_relaxed);
+    muteAtomic[(size_t)ch].store(mode == 1 ? 1 : 0, std::memory_order_relaxed);
+    refreshChannelControlButton(ch);
+
+    if (shouldSave)
+        saveSessionState();
+}
+
+// Updates the A/B status text line.
+void MainComponent::refreshSnapshotLabel()
+{
+    const juce::String aState = snapshotA.valid ? "A:ready" : "A:empty";
+    const juce::String bState = snapshotB.valid ? "B:ready" : "B:empty";
+    snapshotLabel.setText("A/B Snapshots: " + aState + "  |  " + bState, juce::dontSendNotification);
+}
+
+// Stores current settings into snapshot A or B.
+void MainComponent::storeSnapshot(bool toA)
+{
+    auto& slot = toA ? snapshotA : snapshotB;
+    slot.params = captureParamsFromSliders();
+    slot.masterGain = float(masterVol.getValue());
+    slot.surroundMode = surround51Active;
+    slot.valid = true;
+
+    refreshSnapshotLabel();
+    channelImpactLabel.setText("Stored snapshot " + juce::String(toA ? "A" : "B"), juce::dontSendNotification);
+}
+
+// Recalls snapshot A or B if available.
+void MainComponent::recallSnapshot(bool fromA)
+{
+    const auto& slot = fromA ? snapshotA : snapshotB;
+    if (!slot.valid)
+    {
+        channelImpactLabel.setText("Snapshot " + juce::String(fromA ? "A" : "B") + " is empty.", juce::dontSendNotification);
+        return;
+    }
+
+    applyPreset(slot.params);
+    masterVol.setValue(slot.masterGain, juce::dontSendNotification);
+    masterGainAtomic.store(slot.masterGain, std::memory_order_relaxed);
+
+    surround51Active = slot.surroundMode;
+    btnStereo.setToggleState(!surround51Active, juce::dontSendNotification);
+    btn51.setToggleState(surround51Active, juce::dontSendNotification);
+    engine.reset();
+
+    refreshStatusLabel();
+    channelImpactLabel.setText("Recalled snapshot " + juce::String(fromA ? "A" : "B"), juce::dontSendNotification);
+    flashChannelFocus({0, 1, 2, 3, 4, 5}, "Snapshot Recall");
+    saveSessionState();
+}
+
+// Resets all pro metering counters/history.
+void MainComponent::resetProMeters()
+{
+    peakDbAtomic.store(-120.0f, std::memory_order_relaxed);
+    lufsApproxAtomic.store(-70.0f, std::memory_order_relaxed);
+    clipEventsAtomic.store(0, std::memory_order_relaxed);
+    lufsIntegrator = -70.0f;
+}
+
+// Applies channel solo/mute matrix to post-processed output.
+void MainComponent::applyChannelMasking(juce::AudioBuffer<float>& buffer, int numSamples)
+{
+    bool anySolo = false;
+    std::array<int, 6> solo {};
+    std::array<int, 6> mute {};
+
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        solo[(size_t)ch] = soloAtomic[(size_t)ch].load(std::memory_order_relaxed);
+        mute[(size_t)ch] = muteAtomic[(size_t)ch].load(std::memory_order_relaxed);
+        anySolo = anySolo || (solo[(size_t)ch] != 0);
+    }
+
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        const bool audible = anySolo ? (solo[(size_t)ch] != 0) : (mute[(size_t)ch] == 0);
+        if (!audible)
+            buffer.clear(ch, 0, numSamples);
+    }
+}
+
+// Applies per-channel trim, delay, and polarity calibration.
+void MainComponent::applySpeakerCalibration(juce::AudioBuffer<float>& buffer, int numSamples)
+{
+    if (numSamples <= 0)
+        return;
+
+    std::array<float, 6> trim {};
+    std::array<float, 6> polarity {};
+    std::array<int, 6> delaySamples {};
+
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        trim[(size_t)ch] = calibTrimGainAtomic[(size_t)ch].load(std::memory_order_relaxed);
+        polarity[(size_t)ch] = calibPolarityAtomic[(size_t)ch].load(std::memory_order_relaxed) != 0 ? -1.0f : 1.0f;
+        const float delayMs = juce::jmax(0.0f, calibDelayMsAtomic[(size_t)ch].load(std::memory_order_relaxed));
+        delaySamples[(size_t)ch] = int(delayMs * float(currentSampleRate) * 0.001f);
+    }
+
+    if (speakerDelayCapacity <= 2 || speakerDelayBuffer.getNumSamples() != speakerDelayCapacity)
+    {
+        for (int ch = 0; ch < 6; ++ch)
+            buffer.applyGain(ch, 0, numSamples, trim[(size_t)ch] * polarity[(size_t)ch]);
+        return;
+    }
+
+    auto wrap = [this](int index)
+    {
+        while (index < 0) index += speakerDelayCapacity;
+        while (index >= speakerDelayCapacity) index -= speakerDelayCapacity;
+        return index;
+    };
+
+    int writePos = speakerDelayWritePos;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        for (int ch = 0; ch < 6; ++ch)
+        {
+            const float input = buffer.getSample(ch, i) * trim[(size_t)ch] * polarity[(size_t)ch];
+            speakerDelayBuffer.setSample(ch, writePos, input);
+
+            const int d = juce::jlimit(0, speakerDelayCapacity - 1, delaySamples[(size_t)ch]);
+            const int readPos = wrap(writePos - d);
+            buffer.setSample(ch, i, speakerDelayBuffer.getSample(ch, readPos));
+        }
+
+        writePos = wrap(writePos + 1);
+    }
+
+    speakerDelayWritePos = writePos;
+}
+
+// Updates RMS, peak, LUFS-approx, and clip counters from output audio.
+void MainComponent::updateMeterStats(const juce::AudioBuffer<float>& buffer, int numSamples)
+{
+    if (numSamples <= 0)
+        return;
+
+    float blockPeak = 0.0f;
+    float stereoSum = 0.0f;
+
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        const float* data = buffer.getReadPointer(ch);
+        float sum = 0.0f;
+        for (int i = 0; i < numSamples; ++i)
+        {
+            const float v = data[i];
+            const float a = std::abs(v);
+            sum += v * v;
+            blockPeak = juce::jmax(blockPeak, a);
+            if (ch < 2)
+                stereoSum += v * v;
+        }
+        meterRms[ch] = std::sqrt(sum / float(numSamples));
+    }
+
+    const float blockPeakDb = juce::Decibels::gainToDecibels(blockPeak + 1.0e-9f, -120.0f);
+    const float prevPeakDb = peakDbAtomic.load(std::memory_order_relaxed);
+    const float heldPeakDb = blockPeakDb >= prevPeakDb ? blockPeakDb : juce::jmax(blockPeakDb, prevPeakDb - 0.8f);
+    peakDbAtomic.store(heldPeakDb, std::memory_order_relaxed);
+
+    if (blockPeak >= clipDetectThreshold)
+        clipEventsAtomic.fetch_add(1, std::memory_order_relaxed);
+
+    const float stereoRms = std::sqrt(stereoSum / float(juce::jmax(1, numSamples * 2)));
+    const float db = juce::Decibels::gainToDecibels(stereoRms + 1.0e-9f, -120.0f);
+    const float lufsApprox = db - 0.7f;
+    lufsIntegrator = lufsIntegrator * 0.92f + lufsApprox * 0.08f;
+    lufsApproxAtomic.store(lufsIntegrator, std::memory_order_relaxed);
 }
 
 // Briefly highlights channels affected by a control change.
@@ -1290,11 +2235,13 @@ void MainComponent::applyPreset(const UpmixParams& preset)
     syncParamsFromSliders();
     engine.reset();
     flashChannelFocus({0, 1, 2, 3, 4, 5}, "Preset Apply");
+    saveSessionState();
 }
 
 // Preset tuned for stronger movie/cinema impact.
 void MainComponent::applyPresetCinema()
 {
+    activePreset = 0;
     UpmixParams p;
     p.centerGain    = 1.15f;
     p.centerHPF     = 145.0f;
@@ -1316,6 +2263,7 @@ void MainComponent::applyPresetCinema()
 // Preset tuned for wider music imaging with moderate center.
 void MainComponent::applyPresetMusicWide()
 {
+    activePreset = 1;
     UpmixParams p;
     p.centerGain    = 0.88f;
     p.centerHPF     = 120.0f;
@@ -1337,6 +2285,7 @@ void MainComponent::applyPresetMusicWide()
 // Preset tuned for vocal clarity and center focus.
 void MainComponent::applyPresetVocalFocus()
 {
+    activePreset = 2;
     UpmixParams p;
     p.centerGain    = 1.35f;
     p.centerHPF     = 210.0f;
@@ -1358,7 +2307,29 @@ void MainComponent::applyPresetVocalFocus()
 // Restores all parameters to constructor defaults.
 void MainComponent::resetToDefaultPreset()
 {
+    activePreset = -1;
     applyPreset(UpmixParams{});
+
+    // Reset channel controls to normal.
+    for (int ch = 0; ch < 6; ++ch)
+        setChannelControlMode(ch, 0, false);
+
+    // Reset speaker calibration (trim/delay/polarity) to neutral defaults.
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        if (calibTrim[(size_t)ch] != nullptr)
+            calibTrim[(size_t)ch]->slider.setValue(0.0, juce::sendNotificationSync);
+        if (calibDelay[(size_t)ch] != nullptr)
+            calibDelay[(size_t)ch]->slider.setValue(0.0, juce::sendNotificationSync);
+        if (calibPolarity[(size_t)ch] != nullptr)
+            calibPolarity[(size_t)ch]->setToggleState(false, juce::sendNotificationSync);
+
+        calibTrimGainAtomic[(size_t)ch].store(1.0f, std::memory_order_relaxed);
+        calibDelayMsAtomic[(size_t)ch].store(0.0f, std::memory_order_relaxed);
+        calibPolarityAtomic[(size_t)ch].store(0, std::memory_order_relaxed);
+    }
+
+    saveSessionState();
 }
 
 // Shows mode + active output channel count + current audio device.
@@ -1496,6 +2467,7 @@ void MainComponent::followSystemOutputDevice()
 
         configureOutputForCurrentDevice();
         channelImpactLabel.setText("Audio device switched -> " + defaultOutput, juce::dontSendNotification);
+        saveSessionState();
     }
 
     lastKnownDefaultOutputName = defaultOutput;
@@ -1561,6 +2533,7 @@ void MainComponent::openFile()
                 setPlayState(true);
                 refreshStatusLabel();
                 updateTimelineFromTransport();
+                saveSessionState();
             }
             else
             {
@@ -1580,9 +2553,8 @@ void MainComponent::exportCurrentTrackTo51Wav()
     }
 
     // Snapshot the latest UI values now, so export matches what the user sees.
-    syncParamsFromSliders();
-    const UpmixParams paramsSnapshot = engine.params;
-    const float masterGainSnapshot = float(masterVol.getValue());
+    const UpmixParams paramsSnapshot = captureParamsFromSliders();
+    const float masterGainSnapshot = masterGainAtomic.load(std::memory_order_relaxed);
 
     auto suggested = loadedFile.getSiblingFile(loadedFile.getFileNameWithoutExtension() + "_upmix_5_1.wav");
 
@@ -1607,88 +2579,176 @@ void MainComponent::exportCurrentTrackTo51Wav()
             if (!target.hasFileExtension("wav"))
                 target = target.withFileExtension(".wav");
 
-            auto reader = std::unique_ptr<juce::AudioFormatReader>(formatManager.createReaderFor(loadedFile));
-            if (!reader)
+            float maxLimiterReduction = 0.0f;
+            juce::String error;
+            if (!renderFileTo51Wav(loadedFile, target, paramsSnapshot, masterGainSnapshot, maxLimiterReduction, error))
             {
-                channelImpactLabel.setText("Export failed: cannot read source file.", juce::dontSendNotification);
+                channelImpactLabel.setText("Export failed: " + error, juce::dontSendNotification);
                 return;
             }
 
-            if (target.existsAsFile() && !target.deleteFile())
-            {
-                channelImpactLabel.setText("Export failed: cannot overwrite target file.", juce::dontSendNotification);
-                return;
-            }
+            channelImpactLabel.setText("Export complete: " + target.getFileName()
+                                        + "  (Limiter max -" + juce::String(maxLimiterReduction, 1) + " dB)",
+                                        juce::dontSendNotification);
+        });
+}
 
-            auto fileOut = target.createOutputStream();
-            if (!fileOut || !fileOut->openedOk())
-            {
-                channelImpactLabel.setText("Export failed: cannot create output file.", juce::dontSendNotification);
-                return;
-            }
-            std::unique_ptr<juce::OutputStream> outStream(std::move(fileOut));
+// Shared 5.1 render helper used by single-file and batch export.
+bool MainComponent::renderFileTo51Wav(const juce::File& source,
+                                      const juce::File& targetIn,
+                                      const UpmixParams& paramsSnapshot,
+                                      float masterGainSnapshot,
+                                      float& maxLimiterReductionDb,
+                                      juce::String& errorText)
+{
+    if (!source.existsAsFile())
+    {
+        errorText = "source file not found";
+        return false;
+    }
 
-            juce::WavAudioFormat wav;
-            const auto writeOptions = juce::AudioFormatWriterOptions{}
-                .withSampleRate(reader->sampleRate)
-                .withChannelLayout(juce::AudioChannelSet::create5point1())
-                .withBitsPerSample(24);
+    auto reader = std::unique_ptr<juce::AudioFormatReader>(formatManager.createReaderFor(source));
+    if (!reader)
+    {
+        errorText = "cannot read source file";
+        return false;
+    }
 
-            auto writer = wav.createWriterFor(outStream, writeOptions);
-            if (!writer)
-            {
-                channelImpactLabel.setText("Export failed: WAV writer init error.", juce::dontSendNotification);
-                return;
-            }
+    juce::File target = targetIn;
+    if (!target.hasFileExtension("wav"))
+        target = target.withFileExtension(".wav");
 
-            constexpr int exportBlockSize = 2048;
-            const int64 totalSamples = reader->lengthInSamples;
+    if (target.existsAsFile() && !target.deleteFile())
+    {
+        errorText = "cannot overwrite target file";
+        return false;
+    }
 
-            UpmixEngine exportEngine;
-            exportEngine.params = paramsSnapshot;
-            exportEngine.prepare(reader->sampleRate, exportBlockSize);
+    auto fileOut = target.createOutputStream();
+    if (!fileOut || !fileOut->openedOk())
+    {
+        errorText = "cannot create output file";
+        return false;
+    }
+    std::unique_ptr<juce::OutputStream> outStream(std::move(fileOut));
 
-            juce::AudioBuffer<float> stereoBlock(2, exportBlockSize);
-            juce::AudioBuffer<float> surroundBlock(6, exportBlockSize);
+    juce::WavAudioFormat wav;
+    const auto writeOptions = juce::AudioFormatWriterOptions{}
+        .withSampleRate(reader->sampleRate)
+        .withChannelLayout(juce::AudioChannelSet::create5point1())
+        .withBitsPerSample(24);
 
-            bool failed = false;
-            for (int64 readPos = 0; readPos < totalSamples; readPos += exportBlockSize)
-            {
-                const int numThisBlock = int(juce::jmin<int64>(exportBlockSize, totalSamples - readPos));
+    auto writer = wav.createWriterFor(outStream, writeOptions);
+    if (!writer)
+    {
+        errorText = "WAV writer init error";
+        return false;
+    }
 
-                stereoBlock.clear();
-                surroundBlock.clear();
+    constexpr int exportBlockSize = 2048;
+    const int64 totalSamples = reader->lengthInSamples;
 
-                // Read as stereo (left/right); mono files will still map correctly.
-                if (!reader->read(&stereoBlock, 0, numThisBlock, readPos, true, true))
-                {
-                    failed = true;
-                    break;
-                }
+    UpmixEngine exportEngine;
+    exportEngine.params = paramsSnapshot;
+    exportEngine.prepare(reader->sampleRate, exportBlockSize);
 
-                // Always export as 5.1 upmix, using the parameter snapshot taken at export start.
-                exportEngine.process(stereoBlock, surroundBlock, numThisBlock, true);
+    juce::AudioBuffer<float> stereoBlock(2, exportBlockSize);
+    juce::AudioBuffer<float> surroundBlock(6, exportBlockSize);
+    float exportLimiterGain = 1.0f;
+    float exportLimiterReduction = 0.0f;
+    int exportLimiterHold = 0;
+    maxLimiterReductionDb = 0.0f;
+    const float exportReleaseCoeff = std::exp(-1.0f / float(juce::jmax(1.0, reader->sampleRate * 0.2)));
 
-                if (masterGainSnapshot != 1.0f)
-                    surroundBlock.applyGain(0, numThisBlock, masterGainSnapshot);
+    for (int64 readPos = 0; readPos < totalSamples; readPos += exportBlockSize)
+    {
+        const int numThisBlock = int(juce::jmin<int64>(exportBlockSize, totalSamples - readPos));
 
-                if (!writer->writeFromAudioSampleBuffer(surroundBlock, 0, numThisBlock))
-                {
-                    failed = true;
-                    break;
-                }
-            }
+        stereoBlock.clear();
+        surroundBlock.clear();
 
+        if (!reader->read(&stereoBlock, 0, numThisBlock, readPos, true, true))
+        {
             writer.reset();
+            target.deleteFile();
+            errorText = "read error during render";
+            return false;
+        }
 
-            if (failed)
-            {
-                target.deleteFile();
-                channelImpactLabel.setText("Export failed during render.", juce::dontSendNotification);
+        exportEngine.process(stereoBlock, surroundBlock, numThisBlock, true);
+
+        if (masterGainSnapshot != 1.0f)
+            surroundBlock.applyGain(0, numThisBlock, masterGainSnapshot);
+
+        applySafetyLimiter(surroundBlock, 6, numThisBlock, limiterThreshold, exportReleaseCoeff,
+                           exportLimiterGain, exportLimiterReduction, exportLimiterHold);
+        maxLimiterReductionDb = juce::jmax(maxLimiterReductionDb, exportLimiterReduction);
+
+        if (!writer->writeFromAudioSampleBuffer(surroundBlock, 0, numThisBlock))
+        {
+            writer.reset();
+            target.deleteFile();
+            errorText = "write error during render";
+            return false;
+        }
+    }
+
+    writer.reset();
+    return true;
+}
+
+// Batch exports multiple source files to 5.1 WAV in a selected folder.
+void MainComponent::exportBatchTo51Wav()
+{
+    batchSourceChooser = std::make_unique<juce::FileChooser>(
+        "Select source audio files for batch export",
+        loadedFile.existsAsFile() ? loadedFile.getParentDirectory() : juce::File{},
+        "*.wav;*.mp3;*.flac;*.aiff;*.ogg;*.aac");
+
+    batchSourceChooser->launchAsync(juce::FileBrowserComponent::openMode
+                                    | juce::FileBrowserComponent::canSelectMultipleItems,
+        [this](const juce::FileChooser& chooser)
+        {
+            auto sources = chooser.getResults();
+            if (sources.isEmpty())
                 return;
-            }
 
-            channelImpactLabel.setText("Export complete: " + target.getFileName(), juce::dontSendNotification);
+            batchPendingFiles = sources;
+            batchTargetChooser = std::make_unique<juce::FileChooser>(
+                "Select output folder for batch export",
+                loadedFile.existsAsFile() ? loadedFile.getParentDirectory() : juce::File{},
+                juce::String{},
+                true);
+
+            batchTargetChooser->launchAsync(juce::FileBrowserComponent::openMode
+                                            | juce::FileBrowserComponent::canSelectDirectories,
+                [this](const juce::FileChooser& destChooser)
+                {
+                    auto folder = destChooser.getResult();
+                    if (folder == juce::File{} || !folder.isDirectory())
+                        return;
+
+                    const UpmixParams paramsSnapshot = captureParamsFromSliders();
+                    const float masterGainSnapshot = masterGainAtomic.load(std::memory_order_relaxed);
+
+                    int okCount = 0;
+                    int failCount = 0;
+                    for (const auto& source : batchPendingFiles)
+                    {
+                        const auto target = folder.getChildFile(source.getFileNameWithoutExtension() + "_upmix_5_1.wav");
+                        float limiterMax = 0.0f;
+                        juce::String error;
+                        if (renderFileTo51Wav(source, target, paramsSnapshot, masterGainSnapshot, limiterMax, error))
+                            ++okCount;
+                        else
+                            ++failCount;
+                    }
+
+                    channelImpactLabel.setText("Batch export complete. Success: "
+                                               + juce::String(okCount)
+                                               + ", Failed: " + juce::String(failCount),
+                                               juce::dontSendNotification);
+                });
         });
 }
 
@@ -1697,11 +2757,12 @@ void MainComponent::setPlayState(bool playing)
 {
     playBtn.setButtonText(playing ? "Pause" : "Play");
     playBtn.onClick = [this, playing] {
-        if (playing) { transport.stop(); setPlayState(false); }
+        if (playing) { transport.stop(); setPlayState(false); saveSessionState(); }
         else if (fileLoaded)
         {
             transport.start();
             setPlayState(true);
+            saveSessionState();
         }
     };
 }
@@ -1711,127 +2772,263 @@ void MainComponent::paint(juce::Graphics& g)
 {
     auto bounds = getLocalBounds().toFloat();
 
-    // Clean dark background.
-    juce::ColourGradient baseBg(COL_BG0, bounds.getX(), bounds.getY(),
-                                COL_BG1, bounds.getX(), bounds.getBottom(), false);
-    g.setGradientFill(baseBg);
+    // Slightly darker premium gradient background.
+    juce::ColourGradient bg(COL_BG0.darker(0.08f), 0.f, 0.f,
+                            COL_BG1.darker(0.04f), 0.f, bounds.getBottom(), false);
+    g.setGradientFill(bg);
     g.fillRect(bounds);
 
+    // Ambient glows for depth without overpowering the layout.
+    g.setColour(COL_ACC.withAlpha(0.09f));
+    g.fillEllipse(-120.0f, -70.0f, 380.0f, 250.0f);
+    g.setColour(COL_PRP.withAlpha(0.07f));
+    g.fillEllipse(bounds.getRight() - 300.0f, -80.0f, 380.0f, 250.0f);
+    g.setColour(COL_ORG.withAlpha(0.06f));
+    g.fillEllipse(bounds.getCentreX() - 240.0f, bounds.getBottom() - 190.0f, 480.0f, 250.0f);
+
+    // Subtle dot grid texture overlay
+    g.setColour(juce::Colours::white.withAlpha(0.014f));
+    const int gridSpacing = 28;
+    for (int y = 0; y < getHeight(); y += gridSpacing)
+        for (int x = 0; x < getWidth(); x += gridSpacing)
+            g.fillRect(x, y, 1, 1);
+
+    // Main shell card
     auto shell = bounds.reduced(8.0f);
-    g.setColour(COL_PANEL.withAlpha(0.95f));
-    g.fillRoundedRectangle(shell, 10.0f);
-    g.setColour(COL_BRDR.withAlpha(0.62f));
-    g.drawRoundedRectangle(shell, 10.0f, 1.0f);
+    juce::ColourGradient shellBg(COL_PANEL.withAlpha(0.92f), shell.getX(), shell.getY(),
+                                  COL_BG0.withAlpha(0.95f), shell.getX(), shell.getBottom(), false);
+    g.setGradientFill(shellBg);
+    g.fillRoundedRectangle(shell, 12.0f);
 
-    auto headerBand = juce::Rectangle<float>(shell.getX() + 8.0f, shell.getY() + 6.0f,
-                                             shell.getWidth() - 16.0f, 44.0f);
-    g.setColour(COL_BG2.withAlpha(0.82f));
-    g.fillRoundedRectangle(headerBand, 7.0f);
-    g.setColour(COL_BRDR.withAlpha(0.48f));
-    g.drawRoundedRectangle(headerBand, 7.0f, 0.9f);
+    // Decorative symbols/shapes inside the shell background.
+    // They stay subtle so the controls remain readable.
+    g.saveState();
+    g.reduceClipRegion(shell.reduced(2.0f).toNearestInt());
 
-    auto titleArea = juce::Rectangle<int>(int(headerBand.getX() + 12.0f), int(headerBand.getY() + 2.0f),
-                                          int(headerBand.getWidth() * 0.65f), 24);
+    const auto symA = COL_ACC.withAlpha(0.07f);
+    const auto symB = COL_PRP.withAlpha(0.06f);
+    const auto symC = COL_ORG.withAlpha(0.055f);
+
+    // Concentric rings.
+    g.setColour(symA);
+    g.drawEllipse(shell.getRight() - 250.0f, shell.getY() + 72.0f, 170.0f, 170.0f, 1.4f);
+    g.drawEllipse(shell.getRight() - 220.0f, shell.getY() + 102.0f, 110.0f, 110.0f, 1.0f);
+    g.setColour(symB);
+    g.drawEllipse(shell.getX() + 12.0f, shell.getBottom() - 190.0f, 150.0f, 150.0f, 1.2f);
+
+    // Triangle and diamond outlines.
+    juce::Path tri;
+    tri.startNewSubPath(shell.getX() + 78.0f, shell.getY() + 120.0f);
+    tri.lineTo(shell.getX() + 128.0f, shell.getY() + 208.0f);
+    tri.lineTo(shell.getX() + 28.0f, shell.getY() + 208.0f);
+    tri.closeSubPath();
+    g.setColour(symC);
+    g.strokePath(tri, juce::PathStrokeType(1.1f));
+
+    juce::Path diamond;
+    const auto dx = shell.getRight() - 110.0f;
+    const auto dy = shell.getBottom() - 140.0f;
+    diamond.startNewSubPath(dx, dy - 26.0f);
+    diamond.lineTo(dx + 26.0f, dy);
+    diamond.lineTo(dx, dy + 26.0f);
+    diamond.lineTo(dx - 26.0f, dy);
+    diamond.closeSubPath();
+    g.setColour(symB);
+    g.strokePath(diamond, juce::PathStrokeType(1.0f));
+
+    // Audio-wave line near the footer.
+    juce::Path wave;
+    const float waveY = shell.getBottom() - 78.0f;
+    wave.startNewSubPath(shell.getX() + 38.0f, waveY);
+    for (float x = shell.getX() + 38.0f; x <= shell.getRight() - 38.0f; x += 6.0f)
+        wave.lineTo(x, waveY + std::sin((x - shell.getX()) * 0.030f) * 7.0f);
+    g.setColour(COL_ACC.withAlpha(0.055f));
+    g.strokePath(wave, juce::PathStrokeType(1.0f));
+
+    // Tiny marker crosses.
+    auto drawCross = [&](float cx, float cy, float r, juce::Colour c)
+    {
+        g.setColour(c);
+        g.drawLine(cx - r, cy, cx + r, cy, 1.0f);
+        g.drawLine(cx, cy - r, cx, cy + r, 1.0f);
+    };
+    drawCross(shell.getX() + 196.0f, shell.getY() + 98.0f, 5.0f, symA);
+    drawCross(shell.getRight() - 176.0f, shell.getY() + 276.0f, 4.0f, symC);
+    drawCross(shell.getX() + 280.0f, shell.getBottom() - 120.0f, 4.0f, symB);
+
+    g.restoreState();
+
+    // Shell outer glow (accent blue tint)
+    g.setColour(COL_ACC.withAlpha(0.07f));
+    g.drawRoundedRectangle(shell.expanded(1.0f), 13.0f, 2.0f);
+    // Shell border
+    g.setColour(COL_BRDR.withAlpha(0.75f));
+    g.drawRoundedRectangle(shell, 12.0f, 1.0f);
+
+    // Header area: horizontal separator line below title
+    auto headerArea = shell.withHeight(62.0f);
+    // Thin accent line at top of shell
+    juce::ColourGradient topAccent(COL_ACC.withAlpha(0.62f), shell.getX() + 20.0f, shell.getY(),
+                                   COL_PRP.withAlpha(0.52f), shell.getX() + 95.0f, shell.getY(), false);
+    g.setGradientFill(topAccent);
+    g.fillRect(shell.getX() + 20.0f, shell.getY(), 75.0f, 2.0f);
+    // Separator below header
+    g.setColour(COL_BRDR.withAlpha(0.45f));
+    g.drawLine(shell.getX() + 12.0f, shell.getY() + 62.0f,
+               shell.getRight() - 12.0f, shell.getY() + 62.0f, 0.7f);
+
+    // Title text
+    auto titleArea = juce::Rectangle<float>(shell.getX() + 16.0f, shell.getY() + 9.0f,
+                                            shell.getWidth() - 32.0f, 26.0f);
+    // Subtle glow behind title
+    g.setColour(COL_ACC.withAlpha(0.07f));
+    g.fillRoundedRectangle(titleArea.reduced(-4.0f, -2.0f), 6.0f);
+
     g.setColour(juce::Colours::white.withAlpha(0.96f));
-    g.setFont(juce::Font(juce::FontOptions("Segoe UI Semibold", fs(20.0f), juce::Font::bold)));
-    g.drawText("Surround 5.1 Upmixer", titleArea, juce::Justification::centredLeft);
+    g.setFont(juce::Font(juce::FontOptions("Consolas", 19.0f, juce::Font::bold)));
+    g.drawText("Surround 5.1 Upmixer", titleArea.toNearestInt(), juce::Justification::centredLeft);
 
-    auto subtitleArea = juce::Rectangle<int>(titleArea.getX(), titleArea.getBottom() - 2,
-                                             int(headerBand.getWidth() * 0.70f), 14);
-    g.setColour(COL_MUT.withAlpha(0.92f));
-    g.setFont(juce::Font(juce::FontOptions("Segoe UI", fs(10.0f), juce::Font::plain)));
-    g.drawText("Discrete hardware output   |   Psychoacoustic upmix   |   Live tuning",
-               subtitleArea, juce::Justification::centredLeft);
+    auto subtitleArea = titleArea.withY(titleArea.getBottom() + 10.0f).withHeight(14.0f);
+    g.setColour(COL_MUT.withAlpha(0.75f));
+    g.setFont(juce::Font(juce::FontOptions("Consolas", 12.0f, juce::Font::plain)));
+    g.drawText("Discrete hardware output  |  Psychoacoustic upmixing  |  Live tuning",
+               subtitleArea.toNearestInt(), juce::Justification::centredLeft);
 
-    auto signatureArea = juce::Rectangle<int>(int(headerBand.getRight()) - 290, int(headerBand.getY() + 6), 278, 22);
-    g.setColour(COL_MUT.withAlpha(0.88f));
-    g.setFont(juce::Font(juce::FontOptions("Segoe UI", fs(10.0f), juce::Font::plain)));
+    // Author credit (right side of header)
+    auto signatureArea = juce::Rectangle<int>(int(shell.getRight()) - 280, int(shell.getY() + 10), 264, 13);
+    g.setColour(COL_MUT.withAlpha(0.40f));
+    g.setFont(juce::Font(juce::FontOptions("Consolas", 12.0f, juce::Font::plain)));
     g.drawText("by Mohamed Moslem Allouch", signatureArea, juce::Justification::centredRight);
 
-    auto drawSection = [&](juce::Rectangle<int> r)
+    // Draw frosted-glass section panes behind UI groups
+    auto drawPane = [&](juce::Rectangle<int> r, bool highlight = false)
     {
-        if (r.isEmpty())
-            return;
-
-        auto b = r.expanded(3, 3).toFloat();
-        g.setColour(COL_BG1.withAlpha(0.78f));
-        g.fillRoundedRectangle(b, 8.5f);
-        g.setColour(COL_BRDR.withAlpha(0.56f));
-        g.drawRoundedRectangle(b, 8.5f, 0.9f);
+        if (r.isEmpty()) return;
+        auto b = r.expanded(4, 4).toFloat();
+        juce::ColourGradient pane(COL_BG2.withAlpha(0.40f), b.getX(), b.getY(),
+                                  COL_BG0.withAlpha(0.58f), b.getX(), b.getBottom(), false);
+        g.setGradientFill(pane);
+        g.fillRoundedRectangle(b, 9.0f);
+        if (highlight)
+            g.setColour(COL_ACC.withAlpha(0.18f));
+        else
+            g.setColour(COL_BRDR.withAlpha(0.55f));
+        g.drawRoundedRectangle(b, 9.0f, 0.9f);
+        if (highlight)
+        {
+            g.setColour(COL_PRP.withAlpha(0.10f));
+            g.fillRoundedRectangle(b.reduced(1.0f), 8.0f);
+        }
+        // Inner sheen
+        g.setColour(juce::Colours::white.withAlpha(0.028f));
+        g.drawRoundedRectangle(b.reduced(1.0f), 8.0f, 0.7f);
     };
 
-    drawSection(fileBtn.getBounds().getUnion(exportBtn.getBounds())
-                .getUnion(settingsBtn.getBounds())
-                .getUnion(fileLabel.getBounds())
-                .getUnion(playBtn.getBounds())
-                .getUnion(stopBtn.getBounds()));
-    drawSection(btnStereo.getBounds().getUnion(btn51.getBounds()));
-    drawSection(statusLabel.getBounds());
-    drawSection(presetLabel.getBounds().getUnion(presetCinema.getBounds())
-                .getUnion(presetMusic.getBounds())
-                .getUnion(presetVocal.getBounds())
-                .getUnion(presetReset.getBounds()));
-    drawSection(channelImpactLabel.getBounds());
-    drawSection(timelineSlider.getBounds().getUnion(timelineLabel.getBounds()));
-    drawSection(spectrum.getBounds());
-    drawSection(masterVolLabel.getBounds().getUnion(masterVol.getBounds()));
-
+    // Mode toggle pane (highlight it)
+    drawPane(btnStereo.getBounds().getUnion(btn51.getBounds()), true);
+    // File/transport row
+    drawPane(fileBtn.getBounds()
+             .getUnion(exportBtn.getBounds())
+             .getUnion(batchExportBtn.getBounds())
+             .getUnion(settingsBtn.getBounds())
+             .getUnion(fileLabel.getBounds())
+             .getUnion(stopBtn.getBounds())
+             .getUnion(playBtn.getBounds()));
+    // Status bar (inline, no pane - just divider lines)
+    // Preset pane
+    drawPane(presetLabel.getBounds()
+             .getUnion(presetCinema.getBounds())
+             .getUnion(presetMusic.getBounds())
+             .getUnion(presetVocal.getBounds())
+             .getUnion(presetReset.getBounds())
+             .getUnion(presetSave.getBounds())
+             .getUnion(presetLoad.getBounds())
+             .getUnion(snapshotStoreA.getBounds())
+             .getUnion(snapshotStoreB.getBounds())
+             .getUnion(snapshotRecallA.getBounds())
+             .getUnion(snapshotRecallB.getBounds())
+             .getUnion(snapshotLabel.getBounds()));
+    // Effect chain label (no border, inline)
+    // Channel solo/mute row
+    drawPane(channelControlLabel.getBounds()
+             .getUnion(soloBtns[0].getBounds()).getUnion(soloBtns[1].getBounds())
+             .getUnion(soloBtns[2].getBounds()).getUnion(soloBtns[3].getBounds())
+             .getUnion(soloBtns[4].getBounds()).getUnion(soloBtns[5].getBounds()));
+    // Timeline pane
+    drawPane(timelineSlider.getBounds().getUnion(timelineLabel.getBounds()));
+    // Spectrum pane
+    drawPane(spectrum.getBounds());
+    // Master volume
+    drawPane(masterVolLabel.getBounds()
+             .getUnion(masterVol.getBounds())
+             .getUnion(limiterLabel.getBounds())
+             .getUnion(meterStatsLabel.getBounds())
+             .getUnion(resetMeterStatsBtn.getBounds()));
+    // Meters
     auto meterBounds = mFL.getBounds().getUnion(mFR.getBounds())
         .getUnion(mFC.getBounds()).getUnion(mLFE.getBounds())
         .getUnion(mSL.getBounds()).getUnion(mSR.getBounds());
-    drawSection(meterBounds);
-
-    drawSection(paramsViewport.getBounds());
-    drawSection(channelScope.getBounds());
+    drawPane(meterBounds);
+    // Params viewport
+    drawPane(paramsViewport.getBounds());
+    // Channel scope
+    drawPane(channelScope.getBounds());
 }
 
 // Lays out all controls, meters, visualizers, and scrollable parameter panels.
 void MainComponent::resized()
 {
-    constexpr int gap = 8;
+    constexpr int gap = 7;
     auto root = getLocalBounds().reduced(12);
 
     // Reserved for title/subtitle text drawn in paint().
-    root.removeFromTop(62);
+    root.removeFromTop(66);
     root.removeFromTop(gap);
 
-    const int scopeH = juce::jlimit(62, 92, getHeight() / 9);
+    const int scopeH = juce::jlimit(58, 88, getHeight() / 10);
     auto scopeArea = root.removeFromBottom(scopeH);
     channelScope.setBounds(scopeArea);
     root.removeFromBottom(gap);
 
-    const int minTop = 250;
-    const int minParams = 220;
+    const int minTop = 280;
+    const int minParams = 160;
     const int maxTop = juce::jmax(minTop, root.getHeight() - minParams - gap);
-    const int topH = juce::jlimit(minTop, maxTop, int(float(root.getHeight()) * 0.52f));
+    const int topH = juce::jlimit(minTop, maxTop, int(float(root.getHeight()) * 0.74f));
     auto top = root.removeFromTop(topH);
     root.removeFromTop(gap);
 
+    // File/transport row
     auto fileRow = top.removeFromTop(34);
-    fileBtn.setBounds(fileRow.removeFromLeft(126));
+    fileBtn.setBounds(fileRow.removeFromLeft(108));
     fileRow.removeFromLeft(gap);
-    exportBtn.setBounds(fileRow.removeFromLeft(148));
+    exportBtn.setBounds(fileRow.removeFromLeft(138));
     fileRow.removeFromLeft(gap);
-    settingsBtn.setBounds(fileRow.removeFromLeft(136));
+    batchExportBtn.setBounds(fileRow.removeFromLeft(132));
     fileRow.removeFromLeft(gap);
-    playBtn.setBounds(fileRow.removeFromRight(86));
+    settingsBtn.setBounds(fileRow.removeFromLeft(124));
+    fileRow.removeFromLeft(gap);
+    playBtn.setBounds(fileRow.removeFromRight(88));
     fileRow.removeFromRight(gap);
     stopBtn.setBounds(fileRow.removeFromRight(78));
     fileRow.removeFromRight(gap);
     fileLabel.setBounds(fileRow);
 
-    top.removeFromTop(gap);
-    auto modeRow = top.removeFromTop(54);
+    // Extra breathing room between channel controls and timeline/master area.
+    top.removeFromTop(gap + 6);
+    // Mode row
+    auto modeRow = top.removeFromTop(52);
     auto leftMode = modeRow.removeFromLeft((modeRow.getWidth() - gap) / 2);
     modeRow.removeFromLeft(gap);
     btnStereo.setBounds(leftMode);
     btn51.setBounds(modeRow);
 
     top.removeFromTop(gap);
-    statusLabel.setBounds(top.removeFromTop(24));
+    // Status bar (inline, no background pane)
+    statusLabel.setBounds(top.removeFromTop(20));
 
     top.removeFromTop(gap);
-    presetLabel.setBounds(top.removeFromTop(18));
+    // Preset row
+    presetLabel.setBounds(top.removeFromTop(16));
     top.removeFromTop(4);
     auto presetRow = top.removeFromTop(30);
     const int presetW = (presetRow.getWidth() - 3 * gap) / 4;
@@ -1843,27 +3040,74 @@ void MainComponent::resized()
     presetRow.removeFromLeft(gap);
     presetReset.setBounds(presetRow);
 
-    top.removeFromTop(gap);
-    channelImpactLabel.setBounds(top.removeFromTop(22));
+    top.removeFromTop(5);
+    auto presetUtilityRow = top.removeFromTop(28);
+    const int utilW = (presetUtilityRow.getWidth() - gap) / 2;
+    presetSave.setBounds(presetUtilityRow.removeFromLeft(utilW));
+    presetUtilityRow.removeFromLeft(gap);
+    presetLoad.setBounds(presetUtilityRow);
+
+    top.removeFromTop(5);
+    auto snapshotRow = top.removeFromTop(27);
+    const int snapW = (snapshotRow.getWidth() - 3 * gap) / 4;
+    snapshotStoreA.setBounds(snapshotRow.removeFromLeft(snapW));
+    snapshotRow.removeFromLeft(gap);
+    snapshotRecallA.setBounds(snapshotRow.removeFromLeft(snapW));
+    snapshotRow.removeFromLeft(gap);
+    snapshotStoreB.setBounds(snapshotRow.removeFromLeft(snapW));
+    snapshotRow.removeFromLeft(gap);
+    snapshotRecallB.setBounds(snapshotRow);
+
+    top.removeFromTop(4);
+    snapshotLabel.setBounds(top.removeFromTop(18));
 
     top.removeFromTop(gap);
+    // Effect chain label
+    channelImpactLabel.setBounds(top.removeFromTop(20));
+
+    top.removeFromTop(4);
+    channelControlLabel.setBounds(top.removeFromTop(16));
+    top.removeFromTop(3);
+    auto soloRow = top.removeFromTop(24);
+    const int chBtnW = (soloRow.getWidth() - gap * 5) / 6;
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        soloBtns[(size_t)ch].setBounds(soloRow.removeFromLeft(chBtnW));
+        if (ch < 5)
+            soloRow.removeFromLeft(gap);
+    }
+
+    // Keep enough visual separation before timeline/master controls.
+    top.removeFromTop(gap + 8);
+    // Timeline row
     auto timelineRow = top.removeFromTop(22);
-    timelineLabel.setBounds(timelineRow.removeFromRight(120));
+    timelineLabel.setBounds(timelineRow.removeFromRight(126));
     timelineRow.removeFromRight(gap);
     timelineSlider.setBounds(timelineRow);
 
     top.removeFromTop(gap);
-    auto meterRow = top.removeFromBottom(juce::jlimit(52, 78, top.getHeight() / 3));
+    // Meters row at the bottom of top section
+    auto meterRow = top.removeFromBottom(juce::jlimit(48, 74, top.getHeight() / 3));
     top.removeFromBottom(gap);
+    auto meterStatsRow = top.removeFromBottom(22);
+    top.removeFromBottom(4);
+    // Master volume row
     auto volRow = top.removeFromBottom(22);
     top.removeFromBottom(gap);
+    // Spectrum fills remaining
     spectrum.setBounds(top);
 
-    masterVolLabel.setBounds(volRow.removeFromLeft(110));
+    resetMeterStatsBtn.setBounds(meterStatsRow.removeFromRight(112));
+    meterStatsRow.removeFromRight(gap);
+    meterStatsLabel.setBounds(meterStatsRow);
+
+    masterVolLabel.setBounds(volRow.removeFromLeft(108));
     volRow.removeFromLeft(gap);
+    limiterLabel.setBounds(volRow.removeFromRight(150));
+    volRow.removeFromRight(gap);
     masterVol.setBounds(volRow);
 
-    const int meterGap = 6;
+    const int meterGap = 5;
     const int meterW = (meterRow.getWidth() - meterGap * 5) / 6;
     mFL.setBounds(meterRow.removeFromLeft(meterW));
     meterRow.removeFromLeft(meterGap);
@@ -1880,14 +3124,14 @@ void MainComponent::resized()
     paramsViewport.setBounds(root);
 
     const int scrollThickness = paramsViewport.getScrollBarThickness();
-    const int contentWidth = juce::jmax(520, paramsViewport.getWidth() - scrollThickness - 6);
+    const int contentWidth = juce::jmax(520, paramsViewport.getWidth() - scrollThickness - 4);
     const int xPad = 8;
     const int colGap = 12;
     const int sectionGap = 10;
-    const int sectionPad = 10;
-    const int titleH = 18;
-    const int sliderH = 31;
-    const int sliderGap = 6;
+    const int sectionPad = 12;
+    const int titleH = 20;
+    const int sliderH = 36;
+    const int sliderGap = 5;
     const bool oneColumn = contentWidth < 760;
     const int usableWidth = contentWidth - xPad * 2;
     const int colWidth = oneColumn ? usableWidth : (usableWidth - colGap) / 2;
@@ -1897,7 +3141,7 @@ void MainComponent::resized()
     {
         int yy = yPos + sectionPad - 2;
         title.setBounds(x + sectionPad, yy, colWidth - sectionPad * 2, titleH);
-        yy += titleH + 7;
+        yy += titleH + 6;
 
         for (auto* slider : sliders)
         {
@@ -1912,6 +3156,30 @@ void MainComponent::resized()
     juce::Rectangle<int> lfeCard;
     juce::Rectangle<int> surroundCard;
     juce::Rectangle<int> spaceCard;
+    juce::Rectangle<int> calibCard;
+
+    auto placeCalibrationSection = [&](int x, int yPos, int width)
+    {
+        int yy = yPos + sectionPad - 2;
+        lblCalib.setBounds(x + sectionPad, yy, width - sectionPad * 2, titleH);
+        yy += titleH + 6;
+
+        for (int ch = 0; ch < 6; ++ch)
+        {
+            auto row = juce::Rectangle<int>(x + sectionPad, yy, width - sectionPad * 2, sliderH);
+            const int half = (row.getWidth() - colGap) / 2;
+            calibTrim[(size_t)ch]->setBounds(row.removeFromLeft(half));
+            row.removeFromLeft(colGap);
+            calibDelay[(size_t)ch]->setBounds(row);
+            yy += sliderH + 1;
+
+            calibPolarity[(size_t)ch]->setBounds(x + sectionPad, yy, width - sectionPad * 2, 18);
+            yy += 18 + sliderGap;
+        }
+
+        yy += sectionPad - sliderGap;
+        return juce::Rectangle<int>(x, yPos, width, yy - yPos);
+    };
 
     if (oneColumn)
     {
@@ -1922,7 +3190,9 @@ void MainComponent::resized()
         surroundCard = placeSection(xPad, y, lblSurround, { &sSurrGain, &sHaasMs, &sSurrHPF, &sSideBlend, &sMidBlend });
         y = surroundCard.getBottom() + sectionGap;
         spaceCard = placeSection(xPad, y, lblSpace, { &sReverbWet, &sRoomSize, &sVelvetDens });
-        y = spaceCard.getBottom() + xPad;
+        y = spaceCard.getBottom() + sectionGap;
+        calibCard = placeCalibrationSection(xPad, y, colWidth);
+        y = calibCard.getBottom() + xPad;
     }
     else
     {
@@ -1933,9 +3203,267 @@ void MainComponent::resized()
 
         surroundCard = placeSection(xPad, y, lblSurround, { &sSurrGain, &sHaasMs, &sSurrHPF, &sSideBlend, &sMidBlend });
         spaceCard = placeSection(rightX, y, lblSpace, { &sReverbWet, &sRoomSize, &sVelvetDens });
-        y = juce::jmax(surroundCard.getBottom(), spaceCard.getBottom()) + xPad;
+        y = juce::jmax(surroundCard.getBottom(), spaceCard.getBottom()) + sectionGap;
+        calibCard = placeCalibrationSection(xPad, y, usableWidth);
+        y = calibCard.getBottom() + xPad;
     }
 
-    paramsContent.setCards(frontCard, lfeCard, surroundCard, spaceCard);
+    paramsContent.setCards(frontCard, lfeCard, surroundCard, spaceCard, calibCard);
     paramsContent.setSize(contentWidth, y);
 }
+
+// Returns the app state directory under the current user profile.
+juce::File MainComponent::getStateDirectory() const
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+        .getChildFile("Surround51Upmixer");
+}
+
+// Returns the JSON file used to persist app session state.
+juce::File MainComponent::getSessionFile() const
+{
+    return getStateDirectory().getChildFile("session.json");
+}
+
+// Returns the JSON file used for default preset persistence.
+juce::File MainComponent::getDefaultPresetFile() const
+{
+    return getStateDirectory().getChildFile("default-preset.json");
+}
+
+// Writes the current slider configuration to a preset JSON file.
+bool MainComponent::savePresetToFile(const juce::File& file)
+{
+    auto* rootObj = new juce::DynamicObject();
+    rootObj->setProperty("schemaVersion", 1);
+    rootObj->setProperty("savedAtUtc", juce::Time::getCurrentTime().toISO8601(true));
+    rootObj->setProperty("activePreset", activePreset);
+    rootObj->setProperty("masterGain", float(masterVol.getValue()));
+    rootObj->setProperty("surround51Active", surround51Active);
+    rootObj->setProperty("params", upmixParamsToVar(captureParamsFromSliders()));
+    return writeJsonFile(file, juce::var(rootObj));
+}
+
+// Loads a preset JSON and applies it to UI and audio processing.
+bool MainComponent::loadPresetFromFile(const juce::File& file)
+{
+    juce::var rootVar;
+    if (!readJsonFile(file, rootVar))
+        return false;
+
+    const UpmixParams fallback = captureParamsFromSliders();
+    const juce::var paramsVar = rootVar.getDynamicObject() != nullptr
+        ? rootVar.getDynamicObject()->getProperty("params")
+        : juce::var();
+
+    const UpmixParams loaded = paramsVar.isVoid()
+        ? upmixParamsFromVar(rootVar, fallback)
+        : upmixParamsFromVar(paramsVar, fallback);
+
+    applyPreset(loaded);
+    const float storedMaster = juce::jlimit(0.0f, 1.5f, readFloatProperty(rootVar, "masterGain", float(masterVol.getValue())));
+    masterVol.setValue(storedMaster, juce::dontSendNotification);
+    masterGainAtomic.store(storedMaster, std::memory_order_relaxed);
+    surround51Active = readBoolProperty(rootVar, "surround51Active", surround51Active);
+    btnStereo.setToggleState(!surround51Active, juce::dontSendNotification);
+    btn51.setToggleState(surround51Active, juce::dontSendNotification);
+    activePreset = juce::jlimit(-1, 2, readIntProperty(rootVar, "activePreset", activePreset));
+    saveSessionState();
+    return true;
+}
+
+// Saves app session so the next launch resumes where the user left off.
+void MainComponent::saveSessionState()
+{
+    if (suppressSessionPersistence)
+        return;
+
+    auto* rootObj = new juce::DynamicObject();
+    rootObj->setProperty("schemaVersion", 1);
+    rootObj->setProperty("savedAtUtc", juce::Time::getCurrentTime().toISO8601(true));
+    rootObj->setProperty("fileLoaded", fileLoaded && loadedFile.existsAsFile());
+    rootObj->setProperty("loadedFile", loadedFile.getFullPathName());
+    rootObj->setProperty("transportPositionSec", transport.getCurrentPosition());
+    rootObj->setProperty("transportPlaying", transport.isPlaying());
+    rootObj->setProperty("surround51Active", surround51Active);
+    rootObj->setProperty("masterGain", float(masterVol.getValue()));
+    rootObj->setProperty("activePreset", activePreset);
+    rootObj->setProperty("lastOutputDevice", lastKnownOutputDeviceName);
+    rootObj->setProperty("params", upmixParamsToVar(captureParamsFromSliders()));
+
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        rootObj->setProperty("solo_" + juce::String(channelShortNames[(size_t)ch]),
+                             soloAtomic[(size_t)ch].load(std::memory_order_relaxed) != 0);
+        rootObj->setProperty("mute_" + juce::String(channelShortNames[(size_t)ch]),
+                             muteAtomic[(size_t)ch].load(std::memory_order_relaxed) != 0);
+        if (calibTrim[(size_t)ch] != nullptr)
+            rootObj->setProperty("calibTrimDb_" + juce::String(channelShortNames[(size_t)ch]),
+                                 float(calibTrim[(size_t)ch]->slider.getValue()));
+        if (calibDelay[(size_t)ch] != nullptr)
+            rootObj->setProperty("calibDelayMs_" + juce::String(channelShortNames[(size_t)ch]),
+                                 float(calibDelay[(size_t)ch]->slider.getValue()));
+        if (calibPolarity[(size_t)ch] != nullptr)
+            rootObj->setProperty("calibInvert_" + juce::String(channelShortNames[(size_t)ch]),
+                                 calibPolarity[(size_t)ch]->getToggleState());
+    }
+
+    auto makeSnapshotVar = [](const SnapshotState& s)
+    {
+        auto* snapObj = new juce::DynamicObject();
+        snapObj->setProperty("valid", s.valid);
+        snapObj->setProperty("masterGain", s.masterGain);
+        snapObj->setProperty("surroundMode", s.surroundMode);
+        snapObj->setProperty("params", upmixParamsToVar(s.params));
+        return juce::var(snapObj);
+    };
+    rootObj->setProperty("snapshotA", makeSnapshotVar(snapshotA));
+    rootObj->setProperty("snapshotB", makeSnapshotVar(snapshotB));
+
+    juce::ignoreUnused(writeJsonFile(getSessionFile(), juce::var(rootObj)));
+}
+
+// Restores session fields (file, transport position/state, mode, and parameters).
+void MainComponent::restoreSessionState()
+{
+    juce::ScopedValueSetter<bool> guard(suppressSessionPersistence, true);
+
+    juce::var rootVar;
+    if (!readJsonFile(getSessionFile(), rootVar))
+        return;
+
+    surround51Active = readBoolProperty(rootVar, "surround51Active", surround51Active);
+    btnStereo.setToggleState(!surround51Active, juce::dontSendNotification);
+    btn51.setToggleState(surround51Active, juce::dontSendNotification);
+
+    const float restoredMaster = juce::jlimit(0.0f, 1.5f, readFloatProperty(rootVar, "masterGain", 1.0f));
+    masterVol.setValue(restoredMaster, juce::dontSendNotification);
+    masterGainAtomic.store(restoredMaster, std::memory_order_relaxed);
+
+    const UpmixParams fallback = captureParamsFromSliders();
+    const juce::var paramsVar = rootVar.getDynamicObject() != nullptr
+        ? rootVar.getDynamicObject()->getProperty("params")
+        : juce::var();
+
+    const UpmixParams loaded = paramsVar.isVoid()
+        ? upmixParamsFromVar(rootVar, fallback)
+        : upmixParamsFromVar(paramsVar, fallback);
+
+    applyPreset(loaded);
+    activePreset = juce::jlimit(-1, 2, readIntProperty(rootVar, "activePreset", activePreset));
+
+    for (int ch = 0; ch < 6; ++ch)
+    {
+        const bool solo = readBoolProperty(rootVar, "solo_" + juce::String(channelShortNames[(size_t)ch]), false);
+        const bool mute = readBoolProperty(rootVar, "mute_" + juce::String(channelShortNames[(size_t)ch]), false);
+        const int mode = solo ? 2 : (mute ? 1 : 0);
+        setChannelControlMode(ch, mode, false);
+
+        const float trimDb = readFloatProperty(rootVar, "calibTrimDb_" + juce::String(channelShortNames[(size_t)ch]), 0.0f);
+        const float delayMs = readFloatProperty(rootVar, "calibDelayMs_" + juce::String(channelShortNames[(size_t)ch]), 0.0f);
+        const bool inv = readBoolProperty(rootVar, "calibInvert_" + juce::String(channelShortNames[(size_t)ch]), false);
+
+        if (calibTrim[(size_t)ch] != nullptr)
+            calibTrim[(size_t)ch]->slider.setValue(trimDb, juce::sendNotificationSync);
+        if (calibDelay[(size_t)ch] != nullptr)
+            calibDelay[(size_t)ch]->slider.setValue(delayMs, juce::sendNotificationSync);
+        if (calibPolarity[(size_t)ch] != nullptr)
+            calibPolarity[(size_t)ch]->setToggleState(inv, juce::sendNotificationSync);
+    }
+
+    auto restoreSnapshot = [](const juce::var& root, const juce::Identifier& id, SnapshotState& outState)
+    {
+        if (const auto* rootObj = root.getDynamicObject())
+        {
+            const auto snapVar = rootObj->getProperty(id);
+            outState.valid = readBoolProperty(snapVar, "valid", false);
+            outState.masterGain = readFloatProperty(snapVar, "masterGain", 1.0f);
+            outState.surroundMode = readBoolProperty(snapVar, "surroundMode", false);
+
+            const juce::var pVar = snapVar.getDynamicObject() != nullptr
+                ? snapVar.getDynamicObject()->getProperty("params")
+                : juce::var();
+            outState.params = upmixParamsFromVar(pVar, UpmixParams{});
+        }
+    };
+
+    restoreSnapshot(rootVar, "snapshotA", snapshotA);
+    restoreSnapshot(rootVar, "snapshotB", snapshotB);
+    refreshSnapshotLabel();
+
+    const bool wantsFile = readBoolProperty(rootVar, "fileLoaded", false);
+    const juce::String filePath = readStringProperty(rootVar, "loadedFile", {});
+    if (wantsFile && filePath.isNotEmpty())
+    {
+        const juce::File restoredFile(filePath);
+        if (restoredFile.existsAsFile())
+        {
+            std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(restoredFile));
+            if (reader)
+            {
+                const double sourceRate = reader->sampleRate;
+                trackLengthSeconds = reader->sampleRate > 0.0
+                    ? (double(reader->lengthInSamples) / reader->sampleRate)
+                    : 0.0;
+
+                auto newSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
+                transport.stop();
+                transport.setSource(newSource.get(), 0, nullptr, sourceRate > 0.0 ? sourceRate : currentSampleRate);
+                readerSource = std::move(newSource);
+                loadedFile = restoredFile;
+                fileLoaded = true;
+                fileLabel.setText(restoredFile.getFileName(), juce::dontSendNotification);
+            }
+        }
+    }
+
+    if (!fileLoaded)
+    {
+        fileLabel.setText("  No file loaded", juce::dontSendNotification);
+        setPlayState(false);
+        refreshStatusLabel();
+        updateTimelineFromTransport();
+        refreshSnapshotLabel();
+        return;
+    }
+
+    const double savedPosition = juce::jlimit(0.0, juce::jmax(0.0, trackLengthSeconds),
+                                              double(readFloatProperty(rootVar, "transportPositionSec", 0.0f)));
+    transport.setPosition(savedPosition);
+
+    const bool shouldResumePlayback = readBoolProperty(rootVar, "transportPlaying", false);
+    if (shouldResumePlayback)
+    {
+        transport.start();
+        setPlayState(true);
+    }
+    else
+    {
+        transport.stop();
+        setPlayState(false);
+    }
+
+    refreshStatusLabel();
+    updateTimelineFromTransport();
+    refreshSnapshotLabel();
+}
+
+// Saves the current settings as the app's default preset.
+void MainComponent::saveDefaultPreset()
+{
+    juce::ignoreUnused(savePresetToFile(getDefaultPresetFile()));
+}
+
+// Loads default preset if available; otherwise keeps built-in defaults.
+void MainComponent::loadDefaultPreset()
+{
+    juce::ScopedValueSetter<bool> guard(suppressSessionPersistence, true);
+
+    const auto file = getDefaultPresetFile();
+    if (!file.existsAsFile())
+        return;
+
+    if (!loadPresetFromFile(file))
+        channelImpactLabel.setText("Default preset could not be read, using built-in values.", juce::dontSendNotification);
+}
+
