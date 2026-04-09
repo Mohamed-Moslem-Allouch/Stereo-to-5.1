@@ -3,294 +3,8 @@
 #include <array>
 #include <atomic>
 #include <memory>
-
-//==============================================================================
-//  Psychoacoustic 5.1 upmix engine.
-//  Outputs true 6 discrete channels via JUCE AudioDeviceManager.
-//
-//  5.1 Channel order (Windows / WASAPI / ASIO standard):
-//    0 = Front Left    (FL)
-//    1 = Front Right   (FR)
-//    2 = Front Center  (FC)
-//    3 = LFE           (Subwoofer)
-//    4 = Surround Left (SL)
-//    5 = Surround Right(SR)
-//==============================================================================
-
-struct UpmixParams
-{
-    // Front stage controls (FL/FR/FC)
-    float frontGain     = 1.00f;   // FL/FR level
-    float centerGain    = 1.05f;   // FC level
-    float centerHPF     = 130.0f;  // FC highpass Hz
-
-    // Sub/LFE controls
-    float lfeGain       = 1.20f;   // Sub level
-    float lfeCrossover  = 90.0f;   // LR4 crossover Hz
-    float lfeShelfGain  = 3.5f;    // Low-shelf boost dB at 60Hz
-    float exciterDrive  = 0.45f;   // Harmonic exciter amount
-
-    // Surround controls (SL/SR)
-    float surroundGain  = 0.95f;   // SL/SR level
-    float haasDelayMs   = 16.0f;   // Haas pre-delay ms (5-28)
-    float surroundHPF   = 140.0f;  // SL/SR highpass Hz
-    float sideBlend     = 0.85f;   // How much L-R side signal goes to SL/SR
-    float midBlend      = 0.12f;   // How much mid bleeds into SL/SR
-
-    // Room/decorrelation controls
-    float reverbWet     = 0.62f;   // Velvet reverb wet mix
-    float roomSize      = 0.74f;   // Decay of velvet IR (0-1)
-    float velvetDensity = 2200.0f; // Pulses/sec in velvet noise IR
-};
-
-//==============================================================================
-class UpmixEngine
-{
-public:
-    UpmixEngine();
-
-    // Initializes DSP objects and internal state.
-    void prepare(double sampleRate, int blockSize);
-    // Resets all DSP states (filters, delays, convolution tails).
-    void reset();
-
-    // Processes stereoIn (2 channels) and writes sixChOut (6 channels).
-    // sixChOut must be allocated as 6 channels x numSamples.
-    void process(const juce::AudioBuffer<float>& stereoIn,
-                 juce::AudioBuffer<float>&       sixChOut,
-                 int numSamples,
-                 bool surround51Active);
-
-    UpmixParams params;
-
-private:
-    double sr = 44100.0;
-    int maxBlockSize = 0;
-
-    // Center channel filters
-    juce::dsp::IIR::Filter<float> fcHPF;
-
-    // LFE crossover: Linkwitz-Riley 4th order via cascaded Butterworth LPFs
-    juce::dsp::IIR::Filter<float> lfeLP1, lfeLP2;
-    juce::dsp::IIR::Filter<float> lfeShelf;  // low-shelf boost
-
-    // Surround high-pass filters
-    juce::dsp::IIR::Filter<float> slHPF, srHPF;
-
-    // Haas delay lines (max 50 ms)
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> slDelay { 8192 };
-    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> srDelay { 8192 };
-
-    // Velvet-noise convolution for surround decorrelation
-    juce::dsp::Convolution slConv, srConv;
-
-    // Parameter-tracking for lazy IR rebuild
-    float lastRoomSize     = -1.f;
-    float lastDensity      = -1.f;
-    float lastReverbWet    = -1.f;
-
-    bool  graphPrepared    = false;
-
-    void rebuildFilters();
-    void rebuildVelvetIRs();
-
-    // Builds a mono velvet-noise impulse response buffer.
-    juce::AudioBuffer<float> makeVelvetIR(int lengthMs, float density,
-                                          float roomSize, unsigned seed);
-
-    // Harmonic exciter transfer function.
-    float excite(float x, float drive) const noexcept;
-
-    // Previous param snapshot for dirty checking
-    UpmixParams prevParams;
-
-    juce::dsp::ProcessSpec spec {};
-
-    // Pre-allocated scratch buffers used in process() to avoid audio-thread allocations.
-    juce::AudioBuffer<float> scratchMid;
-    juce::AudioBuffer<float> scratchSide;
-    juce::AudioBuffer<float> scratchFC;
-    juce::AudioBuffer<float> scratchLFE;
-    juce::AudioBuffer<float> scratchSurr;
-    juce::AudioBuffer<float> scratchSL;
-    juce::AudioBuffer<float> scratchSR;
-    juce::AudioBuffer<float> scratchSLConv;
-    juce::AudioBuffer<float> scratchSRConv;
-
-    // Smoothed parameters to reduce zipper noise while dragging controls.
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> frontGainSmoothed;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> centerGainSmoothed;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> lfeGainSmoothed;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> surroundGainSmoothed;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> sideBlendSmoothed;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> midBlendSmoothed;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> reverbWetSmoothed;
-    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> roomSizeSmoothed;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(UpmixEngine)
-};
-
-//==============================================================================
-//  Custom look and feel for the app UI.
-//==============================================================================
-class StudioLookAndFeel : public juce::LookAndFeel_V4
-{
-public:
-    StudioLookAndFeel();
-
-    void drawRotarySlider(juce::Graphics&, int x, int y, int w, int h,
-                          float sliderPos, float startAngle, float endAngle,
-                          juce::Slider&) override;
-
-    void drawLinearSlider(juce::Graphics&, int x, int y, int w, int h,
-                          float sliderPos, float minSliderPos, float maxSliderPos,
-                          juce::Slider::SliderStyle, juce::Slider&) override;
-
-    juce::Label* createSliderTextBox(juce::Slider&) override;
-};
-
-//==============================================================================
-//  LABELLED SLIDER COMPONENT
-//==============================================================================
-class ParamSlider : public juce::Component
-{
-public:
-    ParamSlider(const juce::String& label, float minVal, float maxVal,
-                float defaultVal, const juce::String& unit,
-                juce::Colour accent = juce::Colour(0xff00cfff));
-
-    void resized() override;
-
-    juce::Slider slider;
-    float* target = nullptr;  // kept for compatibility; unused
-
-    std::function<void(float)> onChange;
-
-    juce::String unitStr;
-    juce::Colour accentCol;
-
-private:
-    juce::Label nameLabel;
-    juce::Label valueLabel;
-    float minV, maxV;
-    juce::String labelStr;
-
-    void sliderChanged();
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ParamSlider)
-};
-
-//==============================================================================
-//  MODE TOGGLE BUTTON
-//==============================================================================
-class ModeButton : public juce::Button
-{
-public:
-    ModeButton(const juce::String& label, juce::Colour col);
-    void paintButton(juce::Graphics&, bool, bool) override;
-
-    juce::Colour colour;
-private:
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ModeButton)
-};
-
-//==============================================================================
-//  CHANNEL METER
-//==============================================================================
-class ChannelMeter : public juce::Component, private juce::Timer
-{
-public:
-    ChannelMeter(const juce::String& label, juce::Colour col);
-    void push(float rms);
-    void setEffectFocus(float amount);
-    void paint(juce::Graphics&) override;
-    void timerCallback() override;
-    void resized() override;
-
-private:
-    juce::String lbl;
-    juce::Colour col;
-    float level = 0.f;
-    float peak  = 0.f;
-    float focus = 0.f;
-    int   peakHoldMs = 0;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChannelMeter)
-};
-
-//==============================================================================
-//  SPECTRUM DISPLAY
-//==============================================================================
-class SpectrumDisplay : public juce::Component, private juce::Timer
-{
-public:
-    SpectrumDisplay();
-    void pushBuffer(const float* data, int n);
-    void paint(juce::Graphics&) override;
-    void timerCallback() override;
-    void setSurroundMode(bool s) { isSurround = s; }
-
-private:
-    static constexpr int FFT_ORDER = 10;
-    static constexpr int FFT_SIZE  = 1 << FFT_ORDER;
-
-    juce::dsp::FFT fft { FFT_ORDER };
-    juce::dsp::WindowingFunction<float> window {
-        (size_t)FFT_SIZE,
-        juce::dsp::WindowingFunction<float>::hann
-    };
-
-    float fifo[FFT_SIZE]     = {};
-    float fftData[FFT_SIZE*2]= {};
-    float scopeData[300]     = {};
-    float scopeSmooth[300]   = {};
-    float scopePeak[300]     = {};
-    int   fifoIdx = 0;
-    bool  nextFFT = false;
-    bool  isSurround = false;
-
-    void drawNextFrameOfSpectrum();
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SpectrumDisplay)
-};
-
-//==============================================================================
-//  PER-CHANNEL FLOW DISPLAY
-//==============================================================================
-class ChannelScopeDisplay : public juce::Component
-{
-public:
-    ChannelScopeDisplay();
-    void pushLevels(const float levels[6]);
-    void paint(juce::Graphics&) override;
-
-private:
-    static constexpr int historySize = 220;
-    float history[6][historySize] = {};
-    float latest[6] = {};
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ChannelScopeDisplay)
-};
-
-//==============================================================================
-//  PARAMETER CARDS BACKGROUND
-//==============================================================================
-class ParamsContent : public juce::Component
-{
-public:
-    void setCards(const juce::Rectangle<int>& front,
-                  const juce::Rectangle<int>& lfe,
-                  const juce::Rectangle<int>& surround,
-                  const juce::Rectangle<int>& space,
-                  const juce::Rectangle<int>& calib);
-    void paint(juce::Graphics&) override;
-
-private:
-    juce::Rectangle<int> frontCard;
-    juce::Rectangle<int> lfeCard;
-    juce::Rectangle<int> surroundCard;
-    juce::Rectangle<int> spaceCard;
-    juce::Rectangle<int> calibCard;
-};
+#include "UpmixEngine.h"
+#include "UIComponents.h"
 
 //==============================================================================
 //  Main component: audio engine + transport + UI.
@@ -298,6 +12,7 @@ private:
 class MainComponent : public juce::AudioAppComponent,
                       public juce::Button::Listener,
                       public juce::ChangeListener,
+                      public juce::FileDragAndDropTarget,
                       private juce::Timer
 {
 public:
@@ -314,6 +29,10 @@ public:
     void resized() override;
     void buttonClicked(juce::Button*) override;
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
+    bool isInterestedInFileDrag(const juce::StringArray& files) override;
+    void fileDragEnter(const juce::StringArray& files, int x, int y) override;
+    void fileDragExit(const juce::StringArray& files) override;
+    void filesDropped(const juce::StringArray& files, int x, int y) override;
     void timerCallback() override;
 
 private:
@@ -445,6 +164,10 @@ private:
     std::array<std::unique_ptr<juce::ToggleButton>, 6> calibPolarity;
 
     // Helper methods
+    // Shared loader used by file chooser and drag-and-drop.
+    bool loadAudioFileForPlayback(const juce::File& fileToLoad, bool shouldAutoPlay);
+    // Validates dropped files against supported audio formats.
+    bool isSupportedAudioFile(const juce::File& file) const;
     // Opens the file chooser and loads a track.
     void openFile();
     // Exports loaded audio to a 6-channel WAV using current processing settings.
@@ -520,6 +243,7 @@ private:
     bool suppressSliderCallbacks = false;
     bool suppressSessionPersistence = false;
     bool timelineBeingDragged = false;
+    bool dragDropHighlightActive = false;
     bool deviceReconfigInProgress = false;
     int statusRefreshTick = 0;
     int outputPollTick = 0;
@@ -567,3 +291,5 @@ private:
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
+
+

@@ -15,6 +15,7 @@ int main()
     stereo.clear();
     surround.clear();
 
+    // Stereo stress signal.
     for (int i = 0; i < numSamples; ++i)
     {
         const float t = float(i) / float(sampleRate);
@@ -39,6 +40,7 @@ int main()
     if (surroundEnergy < 1.0e-4f)
         return 3;
 
+    // Stereo mode should keep only FL/FR active.
     surround.clear();
     engine.process(stereo, surround, numSamples, false);
 
@@ -52,6 +54,38 @@ int main()
 
     if (nonStereoEnergy > 1.0e-5f)
         return 4;
+
+    // Mono vocal-like signal should produce a stable center channel (no random spikes).
+    stereo.clear();
+    surround.clear();
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const float t = float(i) / float(sampleRate);
+        const float mono = std::sin(juce::MathConstants<float>::twoPi * 550.0f * t) * 0.25f;
+        stereo.setSample(0, i, mono);
+        stereo.setSample(1, i, mono);
+    }
+
+    engine.process(stereo, surround, numSamples, true);
+
+    const float* fc = surround.getReadPointer(2);
+    float fcEnergy = 0.0f;
+    float fcMaxAbs = 0.0f;
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const float s = fc[i];
+        if (!std::isfinite(s))
+            return 5;
+        fcEnergy += s * s;
+        fcMaxAbs = juce::jmax(fcMaxAbs, std::abs(s));
+    }
+
+    if (fcEnergy < 1.0e-6f)
+        return 6;
+
+    // Sanity cap: FC should not blow up relative to the input range.
+    if (fcMaxAbs > 1.8f)
+        return 7;
 
     return 0;
 }

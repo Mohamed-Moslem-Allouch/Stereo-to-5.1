@@ -1,24 +1,5 @@
 #include "MainComponent.h"
-
-//==============================================================================
-//  COLOURS & CONSTANTS
-//==============================================================================
-static const juce::Colour COL_BG0   (0xff07090c);
-static const juce::Colour COL_BG1   (0xff141a24);
-static const juce::Colour COL_BG2   (0xff1c2533);
-static const juce::Colour COL_BG3   (0xff33485f);
-static const juce::Colour COL_PANEL (0xff141a24);
-static const juce::Colour COL_BRDR  (0xff4a5f78);
-static const juce::Colour COL_ACC   (0xff00cfff);
-static const juce::Colour COL_ORG   (0xffff5e00);
-static const juce::Colour COL_GRN   (0xff00e896);
-static const juce::Colour COL_YLW   (0xffffd700);
-static const juce::Colour COL_PRP   (0xffaa88ff);
-static const juce::Colour COL_TXT   (0xfff3f7fc);
-static const juce::Colour COL_MUT   (0xffb8c8dc);
-static const juce::Colour COL_CARD  (0xff1c2533);
-// This palette is intentionally centralized so visual tuning can happen in one place.
-// If you want to re-theme the app, start by editing these constants.
+#include "ThemeColours.h"
 
 namespace
 {
@@ -42,7 +23,6 @@ juce::Colour getChannelUiColour(int ch)
         return colours[(size_t)ch];
     return COL_ACC;
 }
-
 float readFloatProperty(const juce::var& objectVar, const juce::Identifier& property, float fallback)
 {
     if (const auto* obj = objectVar.getDynamicObject())
@@ -204,1094 +184,6 @@ void applySafetyLimiter(juce::AudioBuffer<float>& buffer,
 }
 } // namespace
 
-//==============================================================================
-//  UPMIX ENGINE
-//==============================================================================
-
-// Constructor keeps the default parameter state.
-// DSP objects are prepared later when the audio device provides format details.
-UpmixEngine::UpmixEngine()
-{
-    // will be rebuilt in prepare()
-}
-
-// Prepares every DSP block with the active sample rate and block size.
-// This must run before the first process() call.
-void UpmixEngine::prepare(double sampleRate, int blockSize)
-{
-    // Store runtime format used by filter/delay calculations.
-    sr = sampleRate;
-    maxBlockSize = juce::jmax(1, blockSize);
-    spec.sampleRate       = sampleRate;
-    spec.maximumBlockSize = (juce::uint32)maxBlockSize;
-    spec.numChannels      = 1;
-
-    // Prepare all mono-path filters.
-    fcHPF .prepare(spec);
-    lfeLP1.prepare(spec);
-    lfeLP2.prepare(spec);
-    lfeShelf.prepare(spec);
-    slHPF .prepare(spec);
-    srHPF .prepare(spec);
-
-    // Delay buffers support up to 50 ms for Haas timing.
-    slDelay.prepare(spec);
-    srDelay.prepare(spec);
-    slDelay.setMaximumDelayInSamples(int(sampleRate * 0.05));
-    srDelay.setMaximumDelayInSamples(int(sampleRate * 0.05));
-
-    // Convolution engines are used for surround decorrelation tails.
-    slConv.prepare(spec);
-    srConv.prepare(spec);
-    slConv.reset();
-    srConv.reset();
-
-    // Force first-time coefficient/IR rebuild.
-    graphPrepared = true;
-    lastRoomSize = lastDensity = lastReverbWet = -1.f;
-
-    // Pre-allocate all temporary processing buffers to keep process() allocation-free.
-    scratchMid.setSize(1, maxBlockSize, false, false, true);
-    scratchSide.setSize(1, maxBlockSize, false, false, true);
-    scratchFC.setSize(1, maxBlockSize, false, false, true);
-    scratchLFE.setSize(1, maxBlockSize, false, false, true);
-    scratchSurr.setSize(1, maxBlockSize, false, false, true);
-    scratchSL.setSize(1, maxBlockSize, false, false, true);
-    scratchSR.setSize(1, maxBlockSize, false, false, true);
-    scratchSLConv.setSize(1, maxBlockSize, false, false, true);
-    scratchSRConv.setSize(1, maxBlockSize, false, false, true);
-
-    // Parameter smoothing to remove zipper noise while dragging controls.
-    constexpr double rampSeconds = 0.04;
-    frontGainSmoothed.reset(sampleRate, rampSeconds);
-    centerGainSmoothed.reset(sampleRate, rampSeconds);
-    lfeGainSmoothed.reset(sampleRate, rampSeconds);
-    surroundGainSmoothed.reset(sampleRate, rampSeconds);
-    sideBlendSmoothed.reset(sampleRate, rampSeconds);
-    midBlendSmoothed.reset(sampleRate, rampSeconds);
-    reverbWetSmoothed.reset(sampleRate, rampSeconds);
-    roomSizeSmoothed.reset(sampleRate, rampSeconds);
-
-    frontGainSmoothed.setCurrentAndTargetValue(params.frontGain);
-    centerGainSmoothed.setCurrentAndTargetValue(params.centerGain);
-    lfeGainSmoothed.setCurrentAndTargetValue(params.lfeGain);
-    surroundGainSmoothed.setCurrentAndTargetValue(params.surroundGain);
-    sideBlendSmoothed.setCurrentAndTargetValue(params.sideBlend);
-    midBlendSmoothed.setCurrentAndTargetValue(params.midBlend);
-    reverbWetSmoothed.setCurrentAndTargetValue(params.reverbWet);
-    roomSizeSmoothed.setCurrentAndTargetValue(params.roomSize);
-
-    // Build initial graph from current parameter values.
-    rebuildFilters();
-    rebuildVelvetIRs();
-
-    // Keep a previous snapshot for change-detection in process().
-    prevParams = params;
-}
-
-// Clears history/state for all DSP blocks.
-void UpmixEngine::reset()
-{
-    fcHPF .reset();
-    lfeLP1.reset();
-    lfeLP2.reset();
-    lfeShelf.reset();
-    slHPF .reset();
-    srHPF .reset();
-    slDelay.reset();
-    srDelay.reset();
-    slConv.reset();
-    srConv.reset();
-
-    frontGainSmoothed.setCurrentAndTargetValue(params.frontGain);
-    centerGainSmoothed.setCurrentAndTargetValue(params.centerGain);
-    lfeGainSmoothed.setCurrentAndTargetValue(params.lfeGain);
-    surroundGainSmoothed.setCurrentAndTargetValue(params.surroundGain);
-    sideBlendSmoothed.setCurrentAndTargetValue(params.sideBlend);
-    midBlendSmoothed.setCurrentAndTargetValue(params.midBlend);
-    reverbWetSmoothed.setCurrentAndTargetValue(params.reverbWet);
-    roomSizeSmoothed.setCurrentAndTargetValue(params.roomSize);
-}
-
-// Rebuilds coefficient-based DSP nodes when relevant controls change.
-void UpmixEngine::rebuildFilters()
-{
-    if (!graphPrepared) return;
-
-    // FC highpass
-    *fcHPF.coefficients  = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, params.centerHPF, 0.707f);
-
-    // LFE Linkwitz-Riley 4th order: two cascaded 2nd-order Butterworth LPFs
-    *lfeLP1.coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowPass(sr, params.lfeCrossover, 0.5f);
-    *lfeLP2.coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowPass(sr, params.lfeCrossover, 0.5f);
-
-    // LFE low-shelf boost
-    *lfeShelf.coefficients = *juce::dsp::IIR::Coefficients<float>::makeLowShelf(
-        sr, 60.f, 0.707f, juce::Decibels::decibelsToGain(params.lfeShelfGain));
-
-    // Surround highpass
-    *slHPF.coefficients  = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, params.surroundHPF, 0.707f);
-    *srHPF.coefficients  = *juce::dsp::IIR::Coefficients<float>::makeHighPass(sr, params.surroundHPF, 0.707f);
-
-    // Haas delays
-    slDelay.setDelay(float(sr * params.haasDelayMs / 1000.0));
-    srDelay.setDelay(float(sr * (params.haasDelayMs + 3.5f) / 1000.0));
-}
-
-// Builds a mono velvet-noise impulse response with controlled decay.
-// This is used by convolution to create spacious but lightweight surround tails.
-juce::AudioBuffer<float> UpmixEngine::makeVelvetIR(int lengthMs, float density,
-                                                     float roomSize, unsigned seed)
-{
-    int len = int(sr * lengthMs / 1000.0);
-    len = std::max(len, 64);
-
-    juce::AudioBuffer<float> ir(1, len);
-    auto* d = ir.getWritePointer(0);
-    ir.clear();
-
-    unsigned s = seed;
-    // Deterministic pseudo-random generator so IRs are repeatable for same seed.
-    auto rnd = [&]() -> float {
-        s = s * 1664525u + 1013904223u;
-        return float(s) / float(std::numeric_limits<unsigned>::max());
-    };
-
-    // Pulse period in samples: higher density => more frequent pulses.
-    float period = float(sr) / density;
-    period = std::max(period, 1.f);
-
-    for (float p = 0.f; p < float(len); p += period)
-    {
-        int idx = juce::jlimit(0, len-1, int(p + rnd() * period));
-        float sign = rnd() > 0.5f ? 1.f : -1.f;
-        // Exponential decay envelope: models room acoustic decay
-        float decay = std::exp(-5.5f * (1.f - roomSize) * float(idx) / float(len));
-        d[idx] = sign * decay;
-    }
-
-    // Normalize energy so different room settings do not cause loudness jumps.
-    float energy = 0.f;
-    for (int i = 0; i < len; i++) energy += d[i]*d[i];
-    if (energy > 1e-9f)
-    {
-        float sc = 1.f / std::sqrt(energy);
-        for (int i = 0; i < len; i++) d[i] *= sc;
-    }
-    return ir;
-}
-
-// Rebuilds left/right IRs when room controls change.
-// Slight asymmetry between channels increases perceived spaciousness.
-void UpmixEngine::rebuildVelvetIRs()
-{
-    if (!graphPrepared) return;
-
-    const int   irLengthMs = juce::jlimit(40, 220, int(35.0f + params.roomSize * 185.0f));
-    const float slDensity  = params.velvetDensity;
-    const float srDensity  = params.velvetDensity * 1.09f;
-
-    auto slIR = makeVelvetIR(irLengthMs,      slDensity, juce::jlimit(0.2f, 0.98f, params.roomSize),          1337u);
-    auto srIR = makeVelvetIR(irLengthMs + 11, srDensity, juce::jlimit(0.2f, 0.98f, params.roomSize * 0.965f), 4242u);
-
-    slConv.loadImpulseResponse(std::move(slIR), sr,
-        juce::dsp::Convolution::Stereo::no,
-        juce::dsp::Convolution::Trim::no,
-        juce::dsp::Convolution::Normalise::no);
-
-    srConv.loadImpulseResponse(std::move(srIR), sr,
-        juce::dsp::Convolution::Stereo::no,
-        juce::dsp::Convolution::Trim::no,
-        juce::dsp::Convolution::Normalise::no);
-
-    lastRoomSize  = params.roomSize;
-    lastDensity   = params.velvetDensity;
-    lastReverbWet = params.reverbWet;
-}
-
-// Simple soft saturation for LFE harmonic enhancement.
-float UpmixEngine::excite(float x, float drive) const noexcept
-{
-    // Soft saturation that generates 2nd + 3rd harmonic distortion.
-    // drive = 0 -> linear, drive = 1 -> heavy saturation
-    float k = drive * 80.f;
-    return (juce::MathConstants<float>::pi + k) * x
-           / (juce::MathConstants<float>::pi + k * std::abs(x));
-}
-
-// Main upmix graph.
-// Input: 2-channel stereo, Output: 6 channels in FL/FR/FC/LFE/SL/SR order.
-void UpmixEngine::process(const juce::AudioBuffer<float>& stereoIn,
-                           juce::AudioBuffer<float>&       sixChOut,
-                           int numSamples,
-                           bool surround51Active)
-{
-    jassert(stereoIn.getNumChannels() >= 2);
-    jassert(sixChOut.getNumChannels() >= 6);
-    jassert(sixChOut.getNumSamples()  >= numSamples);
-
-    if (numSamples > maxBlockSize)
-    {
-        // Keep audio thread allocation-free; this should not happen when prepare() was called
-        // with the current device block size.
-        jassertfalse;
-        sixChOut.clear();
-        return;
-    }
-
-    sixChOut.clear();
-
-    // Rebuild DSP blocks when parameter groups change.
-    if (params.centerHPF    != prevParams.centerHPF    ||
-        params.lfeCrossover != prevParams.lfeCrossover  ||
-        params.lfeShelfGain != prevParams.lfeShelfGain  ||
-        params.surroundHPF  != prevParams.surroundHPF   ||
-        params.haasDelayMs  != prevParams.haasDelayMs)
-    {
-        rebuildFilters();
-    }
-    if (params.roomSize      != lastRoomSize  ||
-        params.velvetDensity != lastDensity)
-    {
-        rebuildVelvetIRs();
-    }
-    prevParams = params;
-
-    frontGainSmoothed.setTargetValue(params.frontGain);
-    centerGainSmoothed.setTargetValue(params.centerGain);
-    lfeGainSmoothed.setTargetValue(params.lfeGain);
-    surroundGainSmoothed.setTargetValue(params.surroundGain);
-    sideBlendSmoothed.setTargetValue(params.sideBlend);
-    midBlendSmoothed.setTargetValue(params.midBlend);
-    reverbWetSmoothed.setTargetValue(params.reverbWet);
-    roomSizeSmoothed.setTargetValue(params.roomSize);
-
-    const float* inL = stereoIn.getReadPointer(0);
-    const float* inR = stereoIn.getReadPointer(1);
-
-    float* outFL  = sixChOut.getWritePointer(0);
-    float* outFR  = sixChOut.getWritePointer(1);
-    float* outFC  = sixChOut.getWritePointer(2);
-    float* outLFE = sixChOut.getWritePointer(3);
-    float* outSL  = sixChOut.getWritePointer(4);
-    float* outSR  = sixChOut.getWritePointer(5);
-
-    if (!surround51Active)
-    {
-        // Stereo mode: direct FL/FR passthrough only.
-        for (int i = 0; i < numSamples; ++i)
-        {
-            const float g = frontGainSmoothed.getNextValue();
-            outFL[i] = inL[i] * g;
-            outFR[i] = inR[i] * g;
-        }
-        // Remaining channels stay silent.
-        return;
-    }
-
-    // 5.1 upmix mode signal flow.
-
-    float* mid  = scratchMid.getWritePointer(0);
-    float* side = scratchSide.getWritePointer(0);
-
-    // Mid/Side extraction from stereo input + smoothed front gain.
-    for (int i = 0; i < numSamples; i++)
-    {
-        const float frontG = frontGainSmoothed.getNextValue();
-        outFL[i] = inL[i] * frontG;
-        outFR[i] = inR[i] * frontG;
-
-        mid[i]  = (inL[i] + inR[i]) * 0.5f;
-        side[i] = (inL[i] - inR[i]) * 0.5f;
-    }
-
-    // FC path: Mid -> high-pass -> gain -> center.
-    {
-        scratchFC.copyFrom(0, 0, scratchMid, 0, 0, numSamples);
-        juce::dsp::AudioBlock<float> blk(scratchFC);
-        juce::dsp::ProcessContextReplacing<float> ctx(blk);
-        fcHPF.process(ctx);
-
-        const float* fcIn = scratchFC.getReadPointer(0);
-        for (int i = 0; i < numSamples; ++i)
-            outFC[i] = fcIn[i] * centerGainSmoothed.getNextValue();
-    }
-
-    // LFE path: Mid -> LR4 crossover -> shelf -> exciter -> gain.
-    {
-        scratchLFE.copyFrom(0, 0, scratchMid, 0, 0, numSamples);
-
-        juce::dsp::AudioBlock<float> blk(scratchLFE);
-        juce::dsp::ProcessContextReplacing<float> ctx(blk);
-        lfeLP1.process(ctx);    // 1st 2nd-order Butterworth LPF
-        lfeLP2.process(ctx);    // 2nd 2nd-order stage -> LR4 total
-        lfeShelf.process(ctx);  // Low shelf boost
-
-        float* lfePtr = scratchLFE.getWritePointer(0);
-        float  drive  = params.exciterDrive;
-        for (int i = 0; i < numSamples; i++)
-            outLFE[i] = std::tanh(excite(lfePtr[i], drive)) * lfeGainSmoothed.getNextValue();
-    }
-
-    // Surround source: side * blend + mid * midBlend.
-    {
-        float* surr = scratchSurr.getWritePointer(0);
-        for (int i = 0; i < numSamples; i++)
-            surr[i] = side[i] * sideBlendSmoothed.getNextValue()
-                    + mid[i]  * midBlendSmoothed.getNextValue();
-    }
-
-    const float densityNorm = juce::jlimit(0.f, 1.f, (params.velvetDensity - 500.0f) / 3500.0f);
-    const float decorCross = 0.05f + densityNorm * 0.32f;
-
-    // SL path: surround source -> HPF -> Haas delay -> velvet convolution.
-    {
-        scratchSL.copyFrom(0, 0, scratchSurr, 0, 0, numSamples);
-
-        {
-            juce::dsp::AudioBlock<float> blk(scratchSL);
-            juce::dsp::ProcessContextReplacing<float> ctx(blk);
-            slHPF.process(ctx);
-        }
-
-        // Haas delay
-        float* slPtr = scratchSL.getWritePointer(0);
-        for (int i = 0; i < numSamples; i++)
-        {
-            slDelay.pushSample(0, slPtr[i]);
-            slPtr[i] = slDelay.popSample(0);
-        }
-
-        // Velvet noise convolution (decorrelation)
-        scratchSLConv.copyFrom(0, 0, scratchSL, 0, 0, numSamples);
-        {
-            juce::dsp::AudioBlock<float> blk(scratchSLConv);
-            juce::dsp::ProcessContextReplacing<float> ctx(blk);
-            slConv.process(ctx);
-        }
-
-        // Wet/dry blend
-        const float* slDry = scratchSL.getReadPointer(0);
-        const float* slWet = scratchSLConv.getReadPointer(0);
-        for (int i = 0; i < numSamples; i++)
-        {
-            const float wetRaw = reverbWetSmoothed.getNextValue();
-            const float wet = std::pow(juce::jlimit(0.0f, 1.0f, wetRaw), 0.65f);
-            const float dry = 1.0f - wet;
-            const float roomBoost = 0.65f + roomSizeSmoothed.getNextValue() * 0.55f;
-            outSL[i] = (slDry[i] * dry + (slWet[i] * roomBoost) * wet);
-        }
-    }
-
-    // SR path: same as SL with separate IR and extra delay.
-    {
-        scratchSR.copyFrom(0, 0, scratchSurr, 0, 0, numSamples);
-
-        {
-            juce::dsp::AudioBlock<float> blk(scratchSR);
-            juce::dsp::ProcessContextReplacing<float> ctx(blk);
-            srHPF.process(ctx);
-        }
-
-        float* srPtr = scratchSR.getWritePointer(0);
-        for (int i = 0; i < numSamples; i++)
-        {
-            srDelay.pushSample(0, srPtr[i]);
-            srPtr[i] = srDelay.popSample(0);
-        }
-
-        scratchSRConv.copyFrom(0, 0, scratchSR, 0, 0, numSamples);
-        {
-            juce::dsp::AudioBlock<float> blk(scratchSRConv);
-            juce::dsp::ProcessContextReplacing<float> ctx(blk);
-            srConv.process(ctx);
-        }
-
-        const float* srDry = scratchSR.getReadPointer(0);
-        const float* srWet = scratchSRConv.getReadPointer(0);
-        for (int i = 0; i < numSamples; i++)
-        {
-            const float wetRaw = reverbWetSmoothed.getNextValue();
-            const float wet = std::pow(juce::jlimit(0.0f, 1.0f, wetRaw), 0.65f);
-            const float dry = 1.0f - wet;
-            const float roomBoost = 0.65f + roomSizeSmoothed.getNextValue() * 0.55f;
-            outSR[i] = (srDry[i] * dry + (srWet[i] * roomBoost) * wet);
-        }
-    }
-
-    // Stereo surround decorrelation matrix:
-    // higher density creates stronger left/right independence.
-    for (int i = 0; i < numSamples; i++)
-    {
-        const float sl = outSL[i];
-        const float srChan = outSR[i];
-        const float g = surroundGainSmoothed.getNextValue();
-        outSL[i] = (sl - srChan * decorCross) * g;
-        outSR[i] = (srChan - sl * decorCross) * g;
-    }
-}
-
-//==============================================================================
-//  LOOK AND FEEL
-//==============================================================================
-// Central look-and-feel object used by custom sliders/buttons in this app.
-StudioLookAndFeel::StudioLookAndFeel()
-{
-    setColour(juce::Slider::thumbColourId,          COL_ACC);
-    setColour(juce::Slider::trackColourId,          COL_BG3);
-    setColour(juce::Slider::backgroundColourId,     COL_BG2);
-    setColour(juce::Label::textColourId,            COL_TXT);
-    setColour(juce::TextButton::buttonColourId,     COL_CARD);
-    setColour(juce::TextButton::textColourOffId,    COL_TXT);
-    setColour(juce::ComboBox::backgroundColourId,   COL_BG2);
-    setColour(juce::ScrollBar::thumbColourId,       COL_BG3.brighter(0.2f));
-    setColour(juce::ScrollBar::trackColourId,       COL_BG2);
-}
-
-// Draws horizontal sliders with a glowing fill + round thumb.
-void StudioLookAndFeel::drawLinearSlider(juce::Graphics& g,
-    int x, int y, int w, int h,
-    float sliderPos, float minPos, float maxPos,
-    juce::Slider::SliderStyle style, juce::Slider& slider)
-{
-    juce::ignoreUnused(minPos, maxPos, style, slider);
-
-    juce::Colour accent = COL_ACC;
-    if (auto v = slider.getProperties().getVarPointer("accent"); v != nullptr)
-        accent = juce::Colour::fromString(v->toString());
-
-    const float centreY = float(y) + float(h) * 0.5f;
-    const float trackH = 3.5f;
-    const float trackY = centreY - trackH * 0.5f;
-    auto trackBounds = juce::Rectangle<float>(float(x), trackY, float(w), trackH);
-
-    // Track background
-    g.setColour(COL_BG3.withAlpha(0.90f));
-    g.fillRoundedRectangle(trackBounds, trackH * 0.5f);
-
-    // Filled region
-    float fillW = juce::jlimit(0.0f, trackBounds.getWidth(), sliderPos - float(x));
-    if (fillW > 0.0f)
-    {
-        auto fill = trackBounds.withWidth(fillW);
-        // Subtle glow beneath the fill
-        g.setColour(accent.withAlpha(0.18f));
-        g.fillRoundedRectangle(fill.expanded(0.f, 2.5f), 3.5f);
-        // Main gradient fill
-        juce::ColourGradient fg(accent.withAlpha(0.55f), fill.getX(), fill.getY(),
-                                accent.withAlpha(0.95f), fill.getRight(), fill.getBottom(), false);
-        g.setGradientFill(fg);
-        g.fillRoundedRectangle(fill, trackH * 0.5f);
-    }
-
-    // Thumb: outer glow ring
-    const float thumbR = 7.5f;
-    g.setColour(accent.withAlpha(0.22f));
-    g.fillEllipse(sliderPos - thumbR - 2.0f, centreY - thumbR - 2.0f,
-                  (thumbR + 2.0f) * 2.0f, (thumbR + 2.0f) * 2.0f);
-    // Thumb body
-    g.setColour(accent);
-    g.fillEllipse(sliderPos - thumbR, centreY - thumbR, thumbR * 2.0f, thumbR * 2.0f);
-    // Thumb inner highlight
-    g.setColour(juce::Colours::white.withAlpha(0.85f));
-    g.fillEllipse(sliderPos - 2.5f, centreY - 2.5f, 5.0f, 5.0f);
-}
-
-// Draws rotary sliders (used if a control switches to rotary style in future).
-void StudioLookAndFeel::drawRotarySlider(juce::Graphics& g,
-    int x, int y, int w, int h,
-    float sliderPos, float startAngle, float endAngle, juce::Slider& slider)
-{
-    juce::ignoreUnused(slider);
-    auto bounds = juce::Rectangle<int>(x,y,w,h).toFloat().reduced(4);
-    auto cx = bounds.getCentreX(), cy = bounds.getCentreY();
-    auto radius = juce::jmin(bounds.getWidth(), bounds.getHeight()) * 0.4f;
-
-    g.setColour(COL_BG3);
-    g.drawEllipse(cx-radius, cy-radius, radius*2, radius*2, 2.f);
-
-    auto angle = startAngle + sliderPos * (endAngle - startAngle);
-    juce::Path p;
-    p.addLineSegment({cx, cy, cx + radius * std::sin(angle), cy - radius * std::cos(angle)}, 3.f);
-    g.setColour(COL_ACC);
-    g.strokePath(p, juce::PathStrokeType(2.5f));
-}
-
-// Creates a transparent text box style for slider labels when needed.
-juce::Label* StudioLookAndFeel::createSliderTextBox(juce::Slider& s)
-{
-    auto* l = LookAndFeel_V4::createSliderTextBox(s);
-    l->setColour(juce::Label::textColourId, COL_TXT);
-    l->setColour(juce::Label::backgroundColourId, juce::Colours::transparentBlack);
-    return l;
-}
-
-//==============================================================================
-//  PARAM SLIDER
-//==============================================================================
-// Reusable UI widget: parameter name + value readout + custom slider.
-ParamSlider::ParamSlider(const juce::String& label, float minVal, float maxVal,
-                         float defaultVal, const juce::String& unit,
-                         juce::Colour accent)
-    : unitStr(unit), accentCol(accent),
-      minV(minVal), maxV(maxVal), labelStr(label)
-{
-    slider.setRange(double(minVal), double(maxVal), 0.0);
-    slider.setValue(double(defaultVal), juce::dontSendNotification);
-    slider.setSliderStyle(juce::Slider::LinearHorizontal);
-    slider.setTextBoxStyle(juce::Slider::NoTextBox, true, 0, 0);
-    slider.getProperties().set("accent", accent.toString());
-
-    nameLabel.setText(label, juce::dontSendNotification);
-    nameLabel.setColour(juce::Label::textColourId, COL_TXT.withAlpha(0.80f));
-    nameLabel.setFont(juce::Font(juce::FontOptions("Consolas", 12.5f, juce::Font::plain)));
-
-    // Value label styled as a colored badge
-    valueLabel.setColour(juce::Label::textColourId, accent.brighter(0.25f));
-    valueLabel.setColour(juce::Label::backgroundColourId, accent.withAlpha(0.10f));
-    valueLabel.setColour(juce::Label::outlineColourId, accent.withAlpha(0.40f));
-    valueLabel.setFont(juce::Font(juce::FontOptions("Consolas", 12.5f, juce::Font::bold)));
-    valueLabel.setJustificationType(juce::Justification::centred);
-    valueLabel.setBorderSize({ 2, 6, 2, 6 });
-
-    slider.onValueChange = [this] { sliderChanged(); };
-    sliderChanged();  // set initial label
-
-    addAndMakeVisible(slider);
-    addAndMakeVisible(nameLabel);
-    addAndMakeVisible(valueLabel);
-}
-
-// Layouts caption/value row above the slider track.
-void ParamSlider::resized()
-{
-    auto b = getLocalBounds();
-    // Reserve less space for labels so the slider lane has enough height
-    // to render the same thumb style as the master level control.
-    const int topH = juce::jlimit(16, 18, int(float(getHeight()) * 0.40f));
-    auto top = b.removeFromTop(topH);
-    // Value badge: fixed width on right, visually balanced
-    const int valueW = juce::jlimit(68, 106, b.getWidth() / 4);
-    valueLabel.setBounds(top.removeFromRight(valueW).reduced(0, 1));
-    top.removeFromRight(4);
-    nameLabel.setBounds(top);
-    slider.setBounds(b.reduced(0, juce::jmax(1, topH / 7)));
-}
-
-// Formats and displays current value text, then notifies caller.
-void ParamSlider::sliderChanged()
-{
-    float v = float(slider.getValue());
-    juce::String txt;
-    if (unitStr == "Hz")
-        txt = juce::String(juce::roundToInt(v)) + " Hz";
-    else if (unitStr == "ms")
-        txt = juce::String(juce::roundToInt(v)) + " ms";
-    else if (unitStr == "dB")
-        txt = "+" + juce::String(v, 1) + " dB";
-    else
-        txt = juce::String(v, 2) + (unitStr.isEmpty() ? "" : " " + unitStr);
-
-    valueLabel.setText(txt, juce::dontSendNotification);
-
-    if (onChange) onChange(v);
-}
-
-//==============================================================================
-//  MODE BUTTON
-//==============================================================================
-// Toggle button with custom rendering for Stereo vs 5.1 mode selection.
-ModeButton::ModeButton(const juce::String& label, juce::Colour col)
-    : juce::Button(label), colour(col)
-{
-    setClickingTogglesState(true);
-}
-
-// Paints the split title/subtitle style used by mode buttons.
-void ModeButton::paintButton(juce::Graphics& g, bool hover, bool)
-{
-    auto b = getLocalBounds().toFloat().reduced(1.0f);
-    const bool active = getToggleState();
-
-    const auto title    = getButtonText().upToFirstOccurrenceOf("\n", false, false);
-    const auto subtitle = getButtonText().fromFirstOccurrenceOf("\n", false, false).trim();
-
-    // Card background
-    juce::ColourGradient grad(
-        active ? colour.withAlpha(0.13f) : COL_BG2.withAlpha(0.80f), b.getX(), b.getY(),
-        active ? colour.withAlpha(0.06f) : COL_BG2.withAlpha(0.55f), b.getX(), b.getBottom(), false);
-    if (hover && !active)
-        grad = juce::ColourGradient(COL_BG2.brighter(0.06f), b.getX(), b.getY(),
-                                    COL_BG2.withAlpha(0.65f),  b.getX(), b.getBottom(), false);
-    g.setGradientFill(grad);
-    g.fillRoundedRectangle(b, 9.0f);
-
-    // Border: glowing cyan when active
-    if (active)
-    {
-        g.setColour(colour.withAlpha(0.30f));
-        g.drawRoundedRectangle(b.expanded(1.0f), 10.0f, 2.0f);
-    }
-    g.setColour(active ? colour.withAlpha(0.90f) : COL_BRDR.withAlpha(0.70f));
-    g.drawRoundedRectangle(b, 9.0f, active ? 1.5f : 1.0f);
-
-    // Inner sheen
-    auto sheen = b.reduced(1.0f).withHeight(b.getHeight() * 0.45f);
-    g.setColour(juce::Colours::white.withAlpha(active ? 0.055f : 0.035f));
-    g.fillRoundedRectangle(sheen, 8.0f);
-
-    auto content = b.reduced(14.f, 8.f);
-
-    // Dot indicator (left side)
-    const float dotR = 4.5f;
-    const float dotX = content.getX();
-    const float dotY = content.getCentreY();
-    if (active)
-    {
-        g.setColour(colour.withAlpha(0.25f));
-        g.fillEllipse(dotX - dotR * 1.6f, dotY - dotR * 1.6f, dotR * 3.2f, dotR * 3.2f);
-    }
-    g.setColour(colour.withAlpha(active ? 1.0f : 0.35f));
-    g.fillEllipse(dotX - dotR, dotY - dotR, dotR * 2.0f, dotR * 2.0f);
-
-    content.removeFromLeft(int(dotR * 2.0f + 8.0f));
-
-    // Badge on the right (2.0 / 5.1)
-    const bool isStereoBtn = title.containsIgnoreCase("stereo");
-    const juce::String badgeText = isStereoBtn ? "2.0" : "5.1";
-    const int badgeW = 38;
-    auto badge = content.removeFromRight(badgeW).reduced(0.f, 4.0f);
-    g.setColour(COL_BG0.withAlpha(0.70f));
-    g.fillRoundedRectangle(badge, 6.0f);
-    g.setColour(active ? colour.withAlpha(0.85f) : COL_BRDR.withAlpha(0.65f));
-    g.drawRoundedRectangle(badge, 6.0f, 1.0f);
-    g.setFont(juce::Font(juce::FontOptions("Consolas", 11.5f, juce::Font::bold)));
-    g.setColour(active ? colour.brighter(0.15f) : COL_MUT.brighter(0.25f));
-    g.drawFittedText(badgeText, badge.toNearestInt(), juce::Justification::centred, 1);
-
-    content.removeFromRight(6);
-
-    // Title
-    auto titleRow = content.removeFromTop(content.getHeight() * 0.56f);
-    g.setColour(juce::Colours::white.withAlpha(active ? 1.0f : 0.82f));
-    g.setFont(juce::Font(juce::FontOptions("Consolas", 13.5f, juce::Font::bold)));
-    g.drawFittedText(title, titleRow.toNearestInt(), juce::Justification::centredLeft, 1);
-
-    // Subtitle
-    g.setColour(COL_MUT.brighter(active ? 0.30f : 0.10f));
-    g.setFont(juce::Font(juce::FontOptions("Consolas", 10.0f, juce::Font::plain)));
-    g.drawFittedText(subtitle, content.toNearestInt(), juce::Justification::centredLeft, 1);
-}
-
-//==============================================================================
-//  CHANNEL METER
-//==============================================================================
-// Vertical per-channel level meter with peak hold and focus highlight.
-ChannelMeter::ChannelMeter(const juce::String& label, juce::Colour col)
-    : lbl(label), col(col)
-{
-    startTimerHz(30);
-}
-
-// Pushes one RMS value from the audio thread; applies simple smoothing.
-void ChannelMeter::push(float rms)
-{
-    level = std::max(level * 0.85f, rms);
-    if (rms > peak) { peak = rms; peakHoldMs = 1200; }
-}
-
-// Sets temporary highlight strength to show which channel a control affects.
-void ChannelMeter::setEffectFocus(float amount)
-{
-    focus = juce::jlimit(0.f, 1.f, amount);
-}
-
-// Decays held peak marker and repaints at UI rate.
-void ChannelMeter::timerCallback()
-{
-    peak = peakHoldMs > 0 ? peak : peak * 0.95f;
-    peakHoldMs = std::max(0, peakHoldMs - 33);
-    repaint();
-}
-
-// Draws meter fill, held peak line, and channel label.
-void ChannelMeter::paint(juce::Graphics& g)
-{
-    auto b = getLocalBounds().toFloat();
-    const int labelH = 16;
-    auto barArea = b.reduced(2.f).withTrimmedBottom(float(labelH));
-
-    // Track background
-    g.setColour(COL_BG3.withAlpha(0.75f));
-    g.fillRoundedRectangle(barArea, 3.f);
-
-    float fillH = juce::jlimit(0.f, 1.f, level * 4.f);
-    float fillTop = barArea.getBottom() - fillH * barArea.getHeight();
-    auto fillArea = barArea.withTop(fillTop);
-
-    if (fillH > 0.001f)
-    {
-        // Gradient: cyan at bottom fades to white-cyan at top for high levels
-        juce::ColourGradient fillGrad(
-            col.withAlpha(0.88f),  fillArea.getX(), fillArea.getBottom(),
-            col.brighter(0.35f).withAlpha(0.95f), fillArea.getX(), fillArea.getY(), false);
-        if (fillH > 0.75f)
-            fillGrad = juce::ColourGradient(
-                col.withAlpha(0.88f),                  fillArea.getX(), fillArea.getBottom(),
-                juce::Colour(0xffff4444).withAlpha(0.90f), fillArea.getX(), fillArea.getY(), false);
-        g.setGradientFill(fillGrad);
-        g.fillRoundedRectangle(fillArea, 3.f);
-    }
-
-    // Subtle tick marks
-    g.setColour(COL_BG0.withAlpha(0.55f));
-    const int numTicks = 5;
-    for (int i = 1; i < numTicks; ++i)
-    {
-        float ty = barArea.getY() + barArea.getHeight() * (float(i) / float(numTicks));
-        g.drawHorizontalLine(int(ty), barArea.getX(), barArea.getRight());
-    }
-
-    // Focus glow
-    if (focus > 0.001f)
-    {
-        g.setColour(col.withAlpha(0.30f * focus));
-        g.drawRoundedRectangle(barArea.expanded(2.0f), 5.f, 2.0f);
-    }
-
-    // Peak marker
-    float pkFrac = juce::jlimit(0.f, 1.f, peak * 4.f);
-    if (pkFrac > 0.01f)
-    {
-        float pkY = barArea.getBottom() - pkFrac * barArea.getHeight();
-        g.setColour(juce::Colours::white.withAlpha(0.75f));
-        g.fillRect(barArea.getX() + 1.f, pkY - 0.8f, barArea.getWidth() - 2.f, 1.6f);
-    }
-
-    // Label
-    g.setColour(col.withAlpha(0.85f));
-    g.setFont(juce::Font(juce::FontOptions("Consolas", 10.f, juce::Font::bold)));
-    g.drawText(lbl, b.withTop(b.getBottom() - float(labelH)).toNearestInt(),
-               juce::Justification::centred);
-}
-
-// No child controls to lay out currently.
-void ChannelMeter::resized() {}
-
-//==============================================================================
-//  SPECTRUM DISPLAY
-//==============================================================================
-// Lightweight FFT display fed by FL output for a live spectral view.
-SpectrumDisplay::SpectrumDisplay()
-{
-    startTimerHz(30);
-}
-
-// Feeds incoming samples into the FFT fifo.
-void SpectrumDisplay::pushBuffer(const float* data, int n)
-{
-    for (int i = 0; i < n; i++)
-    {
-        fifo[fifoIdx++] = data[i];
-        if (fifoIdx == FFT_SIZE) { nextFFT = true; fifoIdx = 0; }
-    }
-}
-
-// Redraw only when a new FFT frame is ready.
-void SpectrumDisplay::timerCallback()
-{
-    if (nextFFT) { drawNextFrameOfSpectrum(); nextFFT = false; repaint(); }
-}
-
-// Runs FFT and maps bins into the compact UI scope arrays.
-void SpectrumDisplay::drawNextFrameOfSpectrum()
-{
-    std::fill(fftData, fftData + FFT_SIZE*2, 0.f);
-    std::copy(fifo, fifo + FFT_SIZE, fftData);
-    window.multiplyWithWindowingTable(fftData, FFT_SIZE);
-    fft.performFrequencyOnlyForwardTransform(fftData);
-
-    int nBins = (int)std::size(scopeData);
-    for (int i = 0; i < nBins; i++)
-    {
-        float skew = std::pow(float(i)/float(nBins-1), 0.3f);
-        int   bin  = juce::jlimit(1, FFT_SIZE/2-1, int(skew * (FFT_SIZE/2)));
-        float dB   = juce::Decibels::gainToDecibels(fftData[bin]) + 60.f;
-        float norm = juce::jlimit(0.f, 1.f, dB / 60.f);
-        scopeData[i] = norm;
-        scopeSmooth[i] = scopeSmooth[i] * 0.80f + norm * 0.20f;
-        scopePeak[i] = std::max(scopePeak[i] * 0.96f, scopeSmooth[i]);
-    }
-}
-
-// Draws smoothed spectrum curve, peak trace, and filled area.
-void SpectrumDisplay::paint(juce::Graphics& g)
-{
-    auto b = getLocalBounds().toFloat();
-
-    // Background
-    juce::ColourGradient bg(COL_BG2.withAlpha(0.95f), b.getX(), b.getY(),
-                            COL_BG0.withAlpha(0.98f), b.getX(), b.getBottom(), false);
-    g.setGradientFill(bg);
-    g.fillRoundedRectangle(b, 7.f);
-
-    auto plot = b.reduced(6.f, 5.f);
-
-    // Horizontal dB grid lines
-    const char* dbLabels[] = { "0", "-6", "-12", "-18", "-24" };
-    for (int i = 0; i <= 4; ++i)
-    {
-        float y = juce::jmap(float(i), 0.0f, 4.0f, plot.getY(), plot.getBottom());
-        g.setColour(COL_BG3.withAlpha(i == 0 ? 0.55f : 0.40f));
-        g.drawHorizontalLine(int(y), plot.getX(), plot.getRight());
-        g.setColour(COL_MUT.withAlpha(0.50f));
-        g.setFont(juce::Font(juce::FontOptions("Consolas", 8.5f, juce::Font::plain)));
-        g.drawText(dbLabels[i],
-                   juce::Rectangle<int>(int(plot.getRight()) - 26, int(y) - 6, 24, 12),
-                   juce::Justification::centredRight);
-    }
-
-    juce::Path line, fill, peakLine;
-    const int n = (int)std::size(scopeData);
-    const juce::Colour accent = isSurround ? COL_ORG : COL_ACC;
-
-    for (int i = 0; i < n; ++i)
-    {
-        float x = juce::jmap(float(i), 0.0f, float(n - 1), plot.getX(), plot.getRight());
-        float y = juce::jmap(scopeSmooth[i], 0.0f, 1.0f, plot.getBottom(), plot.getY());
-        float yPeak = juce::jmap(scopePeak[i], 0.0f, 1.0f, plot.getBottom(), plot.getY());
-
-        if (i == 0)
-        {
-            line.startNewSubPath(x, y);
-            peakLine.startNewSubPath(x, yPeak);
-            fill.startNewSubPath(x, plot.getBottom());
-            fill.lineTo(x, y);
-        }
-        else
-        {
-            line.lineTo(x, y);
-            peakLine.lineTo(x, yPeak);
-            fill.lineTo(x, y);
-        }
-    }
-
-    fill.lineTo(plot.getRight(), plot.getBottom());
-    fill.closeSubPath();
-
-    // Filled area gradient
-    juce::ColourGradient fillGrad(
-        accent.withAlpha(0.24f), plot.getX(), plot.getY(),
-        accent.withAlpha(0.06f), plot.getX(), plot.getBottom(), false);
-    g.setGradientFill(fillGrad);
-    g.fillPath(fill);
-
-    // Glow stroke
-    g.setColour(accent.withAlpha(0.20f));
-    g.strokePath(line, juce::PathStrokeType(5.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    // Main stroke
-    g.setColour(accent.withAlpha(0.92f));
-    g.strokePath(line, juce::PathStrokeType(2.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-    // Peak trace
-    g.setColour(juce::Colours::white.withAlpha(0.38f));
-    g.strokePath(peakLine, juce::PathStrokeType(1.0f));
-
-    // Frequency labels at bottom
-    const char* freqLabels[] = { "20", "50", "100", "200", "500", "1k", "2k", "5k", "10k", "20k" };
-    const float freqPositions[] = { 0.02f, 0.06f, 0.12f, 0.22f, 0.34f, 0.46f, 0.58f, 0.72f, 0.84f, 0.97f };
-    g.setColour(COL_MUT.withAlpha(0.45f));
-    g.setFont(juce::Font(juce::FontOptions("Consolas", 8.0f, juce::Font::plain)));
-    for (int i = 0; i < 10; ++i)
-    {
-        float lx = plot.getX() + freqPositions[i] * plot.getWidth();
-        g.drawVerticalLine(int(lx), plot.getBottom() - 3.0f, plot.getBottom());
-        g.drawText(freqLabels[i],
-                   juce::Rectangle<int>(int(lx) - 12, int(plot.getBottom()) - 14, 24, 10),
-                   juce::Justification::centred);
-    }
-    // Mode label top-right
-    g.setColour(isSurround ? COL_ORG.withAlpha(0.60f) : COL_ACC.withAlpha(0.60f));
-    g.setFont(juce::Font(juce::FontOptions("Consolas", 9.0f, juce::Font::bold)));
-    g.drawText(isSurround ? "5.1" : "2.0", 
-               juce::Rectangle<int>(int(plot.getRight()) - 26, int(plot.getY()), 24, 14),
-               juce::Justification::centredRight);
-}
-
-//==============================================================================
-//  CHANNEL SCOPE DISPLAY
-//==============================================================================
-// Constructor has no dynamic state beyond default arrays.
-ChannelScopeDisplay::ChannelScopeDisplay() = default;
-
-// Pushes one frame of 6-channel levels into scrolling history buffers.
-void ChannelScopeDisplay::pushLevels(const float levels[6])
-{
-    for (int ch = 0; ch < 6; ++ch)
-    {
-        for (int i = 0; i < historySize - 1; ++i)
-            history[ch][i] = history[ch][i + 1];
-
-        latest[ch] = juce::jlimit(0.0f, 1.0f, levels[ch] * 3.0f);
-        history[ch][historySize - 1] = latest[ch];
-    }
-
-    repaint();
-}
-
-// Draws six horizontal mini-scopes (one lane per channel).
-void ChannelScopeDisplay::paint(juce::Graphics& g)
-{
-    static const char* labels[6] = { "FL", "FR", "FC", "LFE", "SL", "SR" };
-    static const juce::Colour cols[6] =
-    {
-        juce::Colour(0xff00c8ff), juce::Colour(0xff00c8ff), juce::Colour(0xff3fd8a0),
-        juce::Colour(0xffffc840), juce::Colour(0xffff7d30), juce::Colour(0xffff7d30)
-    };
-
-    auto b = getLocalBounds().toFloat();
-
-    // Panel background
-    juce::ColourGradient panelBg(COL_BG2.withAlpha(0.92f), b.getX(), b.getY(),
-                                  COL_BG0.withAlpha(0.96f), b.getX(), b.getBottom(), false);
-    g.setGradientFill(panelBg);
-    g.fillRoundedRectangle(b, 7.f);
-    g.setColour(COL_BRDR.withAlpha(0.55f));
-    g.drawRoundedRectangle(b, 7.f, 1.0f);
-
-    auto lanes = b.reduced(5.f, 4.f);
-    const float laneH = lanes.getHeight() / 6.0f;
-
-    for (int ch = 0; ch < 6; ++ch)
-    {
-        auto lane = lanes.removeFromTop(laneH).reduced(0.f, 0.8f);
-        const auto c = cols[ch];
-        const bool active = latest[ch] > 0.02f;
-
-        // Lane background
-        g.setColour(COL_BG3.withAlpha(active ? 0.55f : 0.38f));
-        g.fillRoundedRectangle(lane, 3.f);
-
-        // Label zone (left)
-        auto leftLabel = lane.removeFromLeft(38.f);
-        // Right info zone
-        auto rightInfo = lane.removeFromRight(52.f);
-        auto plot = lane.reduced(3.f, 1.5f);
-
-        // Waveform path
-        juce::Path p;
-        juce::Path fillP;
-        for (int i = 0; i < historySize; ++i)
-        {
-            float x = juce::jmap(float(i), 0.0f, float(historySize - 1), plot.getX(), plot.getRight());
-            float y = juce::jmap(history[ch][i], 0.0f, 1.0f, plot.getBottom(), plot.getY());
-            if (i == 0) { p.startNewSubPath(x, y); fillP.startNewSubPath(x, plot.getBottom()); fillP.lineTo(x, y); }
-            else        { p.lineTo(x, y); fillP.lineTo(x, y); }
-        }
-        fillP.lineTo(plot.getRight(), plot.getBottom());
-        fillP.closeSubPath();
-
-        // Fill under waveform
-        g.setColour(c.withAlpha(active ? 0.10f : 0.04f));
-        g.fillPath(fillP);
-
-        // Waveform stroke
-        g.setColour(c.withAlpha(active ? 0.88f : 0.28f));
-        g.strokePath(p, juce::PathStrokeType(active ? 1.6f : 1.0f, juce::PathStrokeType::curved, juce::PathStrokeType::rounded));
-
-        // Channel label
-        g.setColour(c.withAlpha(active ? 0.95f : 0.40f));
-        g.setFont(juce::Font(juce::FontOptions("Consolas", 10.f, juce::Font::bold)));
-        g.drawText(labels[ch], leftLabel.toNearestInt(), juce::Justification::centred);
-
-        // Status badge
-        if (active)
-        {
-            g.setColour(c.withAlpha(0.15f));
-            g.fillRoundedRectangle(rightInfo.reduced(4.f, 2.f), 3.f);
-            g.setColour(c.withAlpha(0.80f));
-        }
-        else
-            g.setColour(COL_MUT.withAlpha(0.40f));
-        g.setFont(juce::Font(juce::FontOptions("Consolas", 8.5f, juce::Font::bold)));
-        g.drawText(active ? "ACTIVE" : "IDLE", rightInfo.toNearestInt(), juce::Justification::centred);
-    }
-}
-
-//==============================================================================
-//  PARAMS CONTENT
-//==============================================================================
-// Stores card bounds computed in MainComponent::resized().
-void ParamsContent::setCards(const juce::Rectangle<int>& front,
-                             const juce::Rectangle<int>& lfe,
-                             const juce::Rectangle<int>& surround,
-                             const juce::Rectangle<int>& space,
-                             const juce::Rectangle<int>& calib)
-{
-    frontCard = front;
-    lfeCard = lfe;
-    surroundCard = surround;
-    spaceCard = space;
-    calibCard = calib;
-    repaint();
-}
-
-// Paints stylized backgrounds for the four parameter sections.
-void ParamsContent::paint(juce::Graphics& g)
-{
-    auto drawCard = [&](juce::Rectangle<int> card, juce::Colour accent)
-    {
-        if (card.isEmpty())
-            return;
-
-        auto b = card.toFloat();
-
-        // Drop shadow
-        g.setColour(juce::Colours::black.withAlpha(0.28f));
-        g.fillRoundedRectangle(b.translated(0.0f, 2.5f).expanded(0.5f), 11.0f);
-
-        // Card fill gradient
-        juce::ColourGradient bg(
-            COL_CARD.withAlpha(0.94f), b.getX(), b.getY(),
-            COL_BG0.withAlpha(0.96f),  b.getX(), b.getBottom(), false);
-        g.setGradientFill(bg);
-        g.fillRoundedRectangle(b, 11.0f);
-
-        // Accent left-edge bar
-        auto leftBar = b.withWidth(3.0f).reduced(0.0f, 14.0f);
-        g.setColour(accent.withAlpha(0.70f));
-        g.fillRoundedRectangle(leftBar, 1.5f);
-
-        // Top sheen
-        auto sheen = b.reduced(1.5f).withHeight(b.getHeight() * 0.42f);
-        juce::ColourGradient sheenGrad(
-            juce::Colours::white.withAlpha(0.048f), sheen.getX(), sheen.getY(),
-            juce::Colours::transparentBlack,         sheen.getX(), sheen.getBottom(), false);
-        g.setGradientFill(sheenGrad);
-        g.fillRoundedRectangle(sheen, 10.0f);
-
-        // Outer border
-        g.setColour(COL_BRDR.withAlpha(0.65f));
-        g.drawRoundedRectangle(b, 11.0f, 1.0f);
-        // Inner accent border (subtle)
-        g.setColour(accent.withAlpha(0.16f));
-        g.drawRoundedRectangle(b.reduced(1.0f), 10.0f, 0.8f);
-
-        // Title band at top with faint accent tint
-        auto titleBand = b.withHeight(24.0f);
-        g.setColour(accent.withAlpha(0.12f));
-        g.fillRoundedRectangle(titleBand, 10.0f);
-        // Separator line under title
-        g.setColour(accent.withAlpha(0.28f));
-        g.drawLine(titleBand.getX() + 10.0f, titleBand.getBottom(),
-                   titleBand.getRight() - 10.0f, titleBand.getBottom(), 0.8f);
-    };
-
-    drawCard(frontCard,    COL_ACC);
-    drawCard(lfeCard,      COL_YLW);
-    drawCard(surroundCard, COL_ORG);
-    drawCard(spaceCard,    COL_PRP);
-    drawCard(calibCard,    juce::Colour(0xff66d0ff));
-}
 
 //==============================================================================
 //  MAIN COMPONENT
@@ -1811,6 +703,16 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& info)
 // UI timer: refreshes meters, timeline, and device-follow checks on the message thread.
 void MainComponent::timerCallback()
 {
+    // End-of-track handling: auto-return to start and expose a one-click restart state.
+    if (fileLoaded && transport.hasStreamFinished() && playBtn.getButtonText() != "Start")
+    {
+        transport.stop();
+        transport.setPosition(0.0);
+        setPlayState(false);
+        playBtn.setButtonText("Start");
+        saveSessionState();
+    }
+
     // Push meter values (called from message thread)
     mFL .push(meterRms[0]);
     mFR .push(meterRms[1]);
@@ -2500,6 +1402,126 @@ void MainComponent::openAudioSettings()
     refreshStatusLabel();
 }
 
+// Checks whether a file appears to be one of the currently supported audio formats.
+bool MainComponent::isSupportedAudioFile(const juce::File& file) const
+{
+    if (!file.existsAsFile())
+        return false;
+
+    const auto extension = file.getFileExtension()
+        .fromLastOccurrenceOf(".", false, false)
+        .toLowerCase();
+
+    if (extension.isEmpty())
+        return false;
+
+    return formatManager.findFormatForFileExtension(extension) != nullptr;
+}
+
+// Shared file-loading path used by chooser and drag-and-drop.
+bool MainComponent::loadAudioFileForPlayback(const juce::File& fileToLoad, bool shouldAutoPlay)
+{
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(fileToLoad));
+    if (reader == nullptr)
+    {
+        fileLabel.setText("Could not open: " + fileToLoad.getFileName(), juce::dontSendNotification);
+        return false;
+    }
+
+    const double sourceRate = reader->sampleRate > 0.0 ? reader->sampleRate : currentSampleRate;
+    trackLengthSeconds = reader->sampleRate > 0.0
+        ? (double(reader->lengthInSamples) / reader->sampleRate)
+        : 0.0;
+
+    auto newSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
+    transport.stop();
+    transport.setSource(newSource.get(), 0, nullptr, sourceRate);
+    readerSource = std::move(newSource);
+
+    loadedFile = fileToLoad;
+    fileLoaded = true;
+    fileLabel.setText(fileToLoad.getFileName(), juce::dontSendNotification);
+    timelineSlider.setValue(0.0, juce::dontSendNotification);
+
+    if (shouldAutoPlay)
+    {
+        transport.setPosition(0.0);
+        transport.start();
+        setPlayState(true);
+    }
+    else
+    {
+        transport.setPosition(0.0);
+        setPlayState(false);
+    }
+
+    refreshStatusLabel();
+    updateTimelineFromTransport();
+    saveSessionState();
+    return true;
+}
+
+// File drag target: accept drops if at least one file is supported.
+bool MainComponent::isInterestedInFileDrag(const juce::StringArray& files)
+{
+    for (const auto& path : files)
+    {
+        if (isSupportedAudioFile(juce::File(path)))
+            return true;
+    }
+
+    return false;
+}
+
+// Shows visual drop feedback while dragging supported files over the window.
+void MainComponent::fileDragEnter(const juce::StringArray& files, int x, int y)
+{
+    juce::ignoreUnused(x, y);
+    dragDropHighlightActive = isInterestedInFileDrag(files);
+    if (dragDropHighlightActive)
+    {
+        channelImpactLabel.setText("Drop audio file to load and play.", juce::dontSendNotification);
+        repaint();
+    }
+}
+
+// Clears drag feedback when cursor leaves the app window.
+void MainComponent::fileDragExit(const juce::StringArray& files)
+{
+    juce::ignoreUnused(files);
+    if (!dragDropHighlightActive)
+        return;
+
+    dragDropHighlightActive = false;
+    repaint();
+}
+
+// Loads the first supported dropped file.
+void MainComponent::filesDropped(const juce::StringArray& files, int x, int y)
+{
+    juce::ignoreUnused(x, y);
+    dragDropHighlightActive = false;
+
+    for (const auto& path : files)
+    {
+        const juce::File dropped(path);
+        if (!isSupportedAudioFile(dropped))
+            continue;
+
+        if (loadAudioFileForPlayback(dropped, true))
+            channelImpactLabel.setText("Loaded via drag and drop: " + dropped.getFileName(), juce::dontSendNotification);
+        else
+            channelImpactLabel.setText("Could not open dropped file: " + dropped.getFileName(), juce::dontSendNotification);
+
+        repaint();
+        return;
+    }
+
+    channelImpactLabel.setText("Drop a supported audio file (.wav, .mp3, .flac, .aiff, .ogg, .aac).",
+                               juce::dontSendNotification);
+    repaint();
+}
+
 // Opens source file chooser and attaches selected file to transport playback.
 void MainComponent::openFile()
 {
@@ -2514,31 +1536,7 @@ void MainComponent::openFile()
             auto results = fc.getResults();
             if (results.isEmpty()) return;
 
-            auto f = results[0];
-            auto* reader = formatManager.createReaderFor(f);
-            if (reader)
-            {
-                trackLengthSeconds = reader->sampleRate > 0.0
-                    ? (double(reader->lengthInSamples) / reader->sampleRate)
-                    : 0.0;
-
-                auto newSource = std::make_unique<juce::AudioFormatReaderSource>(reader, true);
-                transport.stop();
-                transport.setSource(newSource.get(), 0, nullptr, reader->sampleRate);
-                readerSource = std::move(newSource);
-                loadedFile = f;
-                fileLabel.setText(f.getFileName(), juce::dontSendNotification);
-                fileLoaded = true;
-                transport.start();
-                setPlayState(true);
-                refreshStatusLabel();
-                updateTimelineFromTransport();
-                saveSessionState();
-            }
-            else
-            {
-                fileLabel.setText("Could not open: " + f.getFileName(), juce::dontSendNotification);
-            }
+            loadAudioFileForPlayback(results[0], true);
         });
 }
 
@@ -2867,6 +1865,16 @@ void MainComponent::paint(juce::Graphics& g)
 
     // Header area: horizontal separator line below title
     auto headerArea = shell.withHeight(62.0f);
+    auto headerBand = headerArea.reduced(2.0f, 1.5f);
+    juce::ColourGradient headerGrad(juce::Colour(0xff0f3a4a).withAlpha(0.88f),
+                                    headerBand.getX(), headerBand.getY(),
+                                    juce::Colour(0xff3f2418).withAlpha(0.86f),
+                                    headerBand.getRight(), headerBand.getY(), false);
+    headerGrad.addColour(0.58, juce::Colour(0xff172a3d).withAlpha(0.88f));
+    g.setGradientFill(headerGrad);
+    g.fillRoundedRectangle(headerBand, 10.0f);
+    g.setColour(COL_BRDR.withAlpha(0.55f));
+    g.drawRoundedRectangle(headerBand, 10.0f, 0.8f);
     // Thin accent line at top of shell
     juce::ColourGradient topAccent(COL_ACC.withAlpha(0.62f), shell.getX() + 20.0f, shell.getY(),
                                    COL_PRP.withAlpha(0.52f), shell.getX() + 95.0f, shell.getY(), false);
@@ -2876,14 +1884,9 @@ void MainComponent::paint(juce::Graphics& g)
     g.setColour(COL_BRDR.withAlpha(0.45f));
     g.drawLine(shell.getX() + 12.0f, shell.getY() + 62.0f,
                shell.getRight() - 12.0f, shell.getY() + 62.0f, 0.7f);
-
     // Title text
     auto titleArea = juce::Rectangle<float>(shell.getX() + 16.0f, shell.getY() + 9.0f,
                                             shell.getWidth() - 32.0f, 26.0f);
-    // Subtle glow behind title
-    g.setColour(COL_ACC.withAlpha(0.07f));
-    g.fillRoundedRectangle(titleArea.reduced(-4.0f, -2.0f), 6.0f);
-
     g.setColour(juce::Colours::white.withAlpha(0.96f));
     g.setFont(juce::Font(juce::FontOptions("Consolas", 19.0f, juce::Font::bold)));
     g.drawText("Surround 5.1 Upmixer", titleArea.toNearestInt(), juce::Justification::centredLeft);
@@ -2973,6 +1976,31 @@ void MainComponent::paint(juce::Graphics& g)
     drawPane(paramsViewport.getBounds());
     // Channel scope
     drawPane(channelScope.getBounds());
+
+    // Drag-and-drop overlay.
+    if (dragDropHighlightActive)
+    {
+        auto dropArea = shell.reduced(20.0f).withTrimmedTop(70.0f).withTrimmedBottom(14.0f);
+        g.setColour(COL_ACC.withAlpha(0.13f));
+        g.fillRoundedRectangle(dropArea, 12.0f);
+
+        g.setColour(COL_ACC.withAlpha(0.75f));
+        g.drawRoundedRectangle(dropArea, 12.0f, 1.6f);
+
+        g.setColour(juce::Colours::white.withAlpha(0.96f));
+        g.setFont(juce::Font(juce::FontOptions("Consolas", 17.0f, juce::Font::bold)));
+        g.drawFittedText("Drop Audio File Here",
+                         dropArea.toNearestInt().reduced(12, 20),
+                         juce::Justification::centred,
+                         1);
+
+        g.setColour(COL_MUT.brighter(0.35f));
+        g.setFont(juce::Font(juce::FontOptions("Consolas", 12.5f, juce::Font::plain)));
+        g.drawFittedText("Supported: WAV, MP3, FLAC, AIFF, OGG, AAC",
+                         dropArea.toNearestInt().reduced(12, 52),
+                         juce::Justification::centredBottom,
+                         1);
+    }
 }
 
 // Lays out all controls, meters, visualizers, and scrollable parameter panels.
@@ -2985,17 +2013,17 @@ void MainComponent::resized()
     root.removeFromTop(66);
     root.removeFromTop(gap);
 
-    const int scopeH = juce::jlimit(58, 88, getHeight() / 10);
+    const int scopeH = juce::jlimit(42, 64, getHeight() / 14);
     auto scopeArea = root.removeFromBottom(scopeH);
     channelScope.setBounds(scopeArea);
     root.removeFromBottom(gap);
 
-    const int minTop = 280;
-    const int minParams = 160;
+    const int minTop = 248;
+    const int minParams = 190;
     const int maxTop = juce::jmax(minTop, root.getHeight() - minParams - gap);
-    const int topH = juce::jlimit(minTop, maxTop, int(float(root.getHeight()) * 0.74f));
+    const int topH = juce::jlimit(minTop, maxTop, int(float(root.getHeight()) * 0.62f));
     auto top = root.removeFromTop(topH);
-    root.removeFromTop(gap);
+    root.removeFromTop(3);
 
     // File/transport row
     auto fileRow = top.removeFromTop(34);
@@ -3014,9 +2042,9 @@ void MainComponent::resized()
     fileLabel.setBounds(fileRow);
 
     // Extra breathing room between channel controls and timeline/master area.
-    top.removeFromTop(gap + 6);
+    top.removeFromTop(gap + 3);
     // Mode row
-    auto modeRow = top.removeFromTop(52);
+    auto modeRow = top.removeFromTop(46);
     auto leftMode = modeRow.removeFromLeft((modeRow.getWidth() - gap) / 2);
     modeRow.removeFromLeft(gap);
     btnStereo.setBounds(leftMode);
@@ -3024,13 +2052,13 @@ void MainComponent::resized()
 
     top.removeFromTop(gap);
     // Status bar (inline, no background pane)
-    statusLabel.setBounds(top.removeFromTop(20));
+    statusLabel.setBounds(top.removeFromTop(18));
 
     top.removeFromTop(gap);
     // Preset row
-    presetLabel.setBounds(top.removeFromTop(16));
-    top.removeFromTop(4);
-    auto presetRow = top.removeFromTop(30);
+    presetLabel.setBounds(top.removeFromTop(14));
+    top.removeFromTop(3);
+    auto presetRow = top.removeFromTop(26);
     const int presetW = (presetRow.getWidth() - 3 * gap) / 4;
     presetCinema.setBounds(presetRow.removeFromLeft(presetW));
     presetRow.removeFromLeft(gap);
@@ -3040,15 +2068,15 @@ void MainComponent::resized()
     presetRow.removeFromLeft(gap);
     presetReset.setBounds(presetRow);
 
-    top.removeFromTop(5);
-    auto presetUtilityRow = top.removeFromTop(28);
+    top.removeFromTop(3);
+    auto presetUtilityRow = top.removeFromTop(24);
     const int utilW = (presetUtilityRow.getWidth() - gap) / 2;
     presetSave.setBounds(presetUtilityRow.removeFromLeft(utilW));
     presetUtilityRow.removeFromLeft(gap);
     presetLoad.setBounds(presetUtilityRow);
 
-    top.removeFromTop(5);
-    auto snapshotRow = top.removeFromTop(27);
+    top.removeFromTop(3);
+    auto snapshotRow = top.removeFromTop(23);
     const int snapW = (snapshotRow.getWidth() - 3 * gap) / 4;
     snapshotStoreA.setBounds(snapshotRow.removeFromLeft(snapW));
     snapshotRow.removeFromLeft(gap);
@@ -3058,17 +2086,17 @@ void MainComponent::resized()
     snapshotRow.removeFromLeft(gap);
     snapshotRecallB.setBounds(snapshotRow);
 
-    top.removeFromTop(4);
-    snapshotLabel.setBounds(top.removeFromTop(18));
+    top.removeFromTop(3);
+    snapshotLabel.setBounds(top.removeFromTop(15));
 
     top.removeFromTop(gap);
     // Effect chain label
-    channelImpactLabel.setBounds(top.removeFromTop(20));
+    channelImpactLabel.setBounds(top.removeFromTop(18));
 
-    top.removeFromTop(4);
-    channelControlLabel.setBounds(top.removeFromTop(16));
     top.removeFromTop(3);
-    auto soloRow = top.removeFromTop(24);
+    channelControlLabel.setBounds(top.removeFromTop(14));
+    top.removeFromTop(3);
+    auto soloRow = top.removeFromTop(22);
     const int chBtnW = (soloRow.getWidth() - gap * 5) / 6;
     for (int ch = 0; ch < 6; ++ch)
     {
@@ -3078,23 +2106,23 @@ void MainComponent::resized()
     }
 
     // Keep enough visual separation before timeline/master controls.
-    top.removeFromTop(gap + 8);
+    top.removeFromTop(gap + 2);
     // Timeline row
-    auto timelineRow = top.removeFromTop(22);
+    auto timelineRow = top.removeFromTop(20);
     timelineLabel.setBounds(timelineRow.removeFromRight(126));
     timelineRow.removeFromRight(gap);
     timelineSlider.setBounds(timelineRow);
 
-    top.removeFromTop(gap);
+    top.removeFromTop(3);
     // Meters row at the bottom of top section
-    auto meterRow = top.removeFromBottom(juce::jlimit(48, 74, top.getHeight() / 3));
+    auto meterRow = top.removeFromBottom(juce::jlimit(42, 58, top.getHeight() / 3));
     top.removeFromBottom(gap);
-    auto meterStatsRow = top.removeFromBottom(22);
-    top.removeFromBottom(4);
+    auto meterStatsRow = top.removeFromBottom(20);
+    top.removeFromBottom(3);
     // Master volume row
-    auto volRow = top.removeFromBottom(22);
-    top.removeFromBottom(gap);
-    // Spectrum fills remaining
+    auto volRow = top.removeFromBottom(20);
+    top.removeFromBottom(3);
+    // Spectrum fills the remaining top section (no empty gap)
     spectrum.setBounds(top);
 
     resetMeterStatsBtn.setBounds(meterStatsRow.removeFromRight(112));
@@ -3466,4 +2494,24 @@ void MainComponent::loadDefaultPreset()
     if (!loadPresetFromFile(file))
         channelImpactLabel.setText("Default preset could not be read, using built-in values.", juce::dontSendNotification);
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 

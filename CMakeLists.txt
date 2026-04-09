@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Surround51Upmixer VERSION 1.5.0)
+project(Surround51Upmixer VERSION 1.6.0)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,14 +22,18 @@ add_subdirectory(${JUCE_DIR} JUCE)
 
 juce_add_gui_app(Surround51Upmixer
     PRODUCT_NAME        "5.1 Surround Upmixer"
-    VERSION             "1.5.0"
+    VERSION             "${PROJECT_VERSION}"
     COMPANY_NAME        "SlouMa"
+    COMPANY_COPYRIGHT   "Mohamed Moslem Allouch"
+    ICON_SMALL          "${CMAKE_SOURCE_DIR}/Source/Assets/app_icon.png"
     NEEDS_CURL          FALSE
     NEEDS_WEB_BROWSER   FALSE
 )
 
 target_sources(Surround51Upmixer PRIVATE
     Source/Main.cpp
+    Source/UpmixEngine.cpp
+    Source/UIComponents.cpp
     Source/MainComponent.cpp
 )
 
@@ -58,10 +62,16 @@ target_link_libraries(Surround51Upmixer PRIVATE
     juce::juce_recommended_warning_flags
 )
 
+
+set_target_properties(Surround51Upmixer PROPERTIES
+    RUNTIME_OUTPUT_NAME "5.1 Surround Upmixer v${PROJECT_VERSION}"
+)
 include(CTest)
 if (BUILD_TESTING)
     add_executable(Surround51UpmixerSmokeTest
         tests/UpmixEngineSmokeTest.cpp
+        Source/UpmixEngine.cpp
+        Source/UIComponents.cpp
         Source/MainComponent.cpp
     )
 
@@ -92,3 +102,10 @@ if (BUILD_TESTING)
 
     add_test(NAME UpmixEngineSmokeTest COMMAND Surround51UpmixerSmokeTest)
 endif()
+
+
+
+
+
+
+
